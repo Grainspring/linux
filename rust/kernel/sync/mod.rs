@@ -7,17 +7,21 @@
 //!
 //! # Example
 //!
-//! ```
-//! fn test() {
-//!     // SAFETY: `init` is called below.
-//!     let data = alloc::sync::Arc::pin(unsafe { Mutex::new(0) });
-//!     mutex_init!(data.as_ref(), "test::data");
-//!     *data.lock() = 10;
-//!     pr_info!("{}\n", *data.lock());
-//! }
+//! ```no_run
+//! # use kernel::prelude::*;
+//! # use kernel::mutex_init;
+//! # use kernel::sync::Mutex;
+//! # use alloc::boxed::Box;
+//! # use core::pin::Pin;
+//! // SAFETY: `init` is called below.
+//! let mut data = Pin::from(Box::new(unsafe { Mutex::new(0) }));
+//! mutex_init!(data.as_mut(), "test::data");
+//! *data.lock() = 10;
+//! pr_info!("{}\n", *data.lock());
 //! ```
 
-use crate::{bindings, c_types, CStr};
+use crate::str::CStr;
+use crate::{bindings, c_types};
 use core::pin::Pin;
 
 mod arc;
@@ -27,7 +31,7 @@ mod locked_by;
 mod mutex;
 mod spinlock;
 
-pub use arc::{Ref, RefCount, RefCounted};
+pub use arc::{Ref, RefBorrow};
 pub use condvar::CondVar;
 pub use guard::{Guard, Lock};
 pub use locked_by::LockedBy;
@@ -35,7 +39,6 @@ pub use mutex::Mutex;
 pub use spinlock::SpinLock;
 
 extern "C" {
-    fn rust_helper_signal_pending() -> c_types::c_int;
     fn rust_helper_cond_resched() -> c_types::c_int;
 }
 
@@ -48,10 +51,12 @@ macro_rules! init_with_lockdep {
     ($obj:expr, $name:literal) => {{
         static mut CLASS: core::mem::MaybeUninit<$crate::bindings::lock_class_key> =
             core::mem::MaybeUninit::uninit();
+        let obj = $obj;
+        let name = $crate::c_str!($name);
         // SAFETY: `CLASS` is never used by Rust code directly; the kernel may change it though.
         #[allow(unused_unsafe)]
         unsafe {
-            $crate::sync::NeedsLockClass::init($obj, $crate::cstr!($name), CLASS.as_mut_ptr())
+            $crate::sync::NeedsLockClass::init(obj, name, CLASS.as_mut_ptr())
         };
     }};
 }
@@ -69,13 +74,7 @@ pub trait NeedsLockClass {
     /// # Safety
     ///
     /// `key` must point to a valid memory location as it will be used by the kernel.
-    unsafe fn init(self: Pin<&Self>, name: CStr<'static>, key: *mut bindings::lock_class_key);
-}
-
-/// Determines if a signal is pending on the current process.
-pub fn signal_pending() -> bool {
-    // SAFETY: No arguments, just checks `current` for pending signals.
-    unsafe { rust_helper_signal_pending() != 0 }
+    unsafe fn init(self: Pin<&mut Self>, name: &'static CStr, key: *mut bindings::lock_class_key);
 }
 
 /// Reschedules the caller's task if needed.

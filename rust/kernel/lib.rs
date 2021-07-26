@@ -14,23 +14,27 @@
 #![no_std]
 #![feature(
     allocator_api,
-    alloc_error_handler,
     associated_type_defaults,
-    const_fn,
+    const_fn_trait_bound,
     const_mut_refs,
     const_panic,
+    const_raw_ptr_deref,
+    const_unreachable_unchecked,
+    doc_cfg,
+    receiver_trait,
+    coerce_unsized,
+    dispatch_from_dyn,
+    unsize,
     try_reserve
 )]
-#![deny(clippy::complexity)]
-#![deny(clippy::correctness)]
-#![deny(clippy::perf)]
-#![deny(clippy::style)]
 
 // Ensure conditional compilation based on the kernel configuration works;
 // otherwise we may silently break things like initcall handling.
 #[cfg(not(CONFIG_RUST))]
 compile_error!("Missing kernel configuration for conditional compilation");
 
+#[cfg(not(test))]
+#[cfg(not(testlib))]
 mod allocator;
 
 #[doc(hidden)]
@@ -44,29 +48,41 @@ pub mod file;
 pub mod file_operations;
 pub mod miscdev;
 pub mod pages;
+pub mod security;
+pub mod str;
+pub mod task;
+pub mod traits;
 
 pub mod linked_list;
 mod raw_list;
+pub mod rbtree;
 
 #[doc(hidden)]
 pub mod module_param;
 
+mod build_assert;
 pub mod prelude;
 pub mod print;
 pub mod random;
 mod static_assert;
 pub mod sync;
 
-#[cfg(CONFIG_SYSCTL)]
+#[cfg(any(CONFIG_SYSCTL, doc))]
+#[doc(cfg(CONFIG_SYSCTL))]
 pub mod sysctl;
 
 pub mod io_buffer;
 pub mod iov_iter;
+pub mod of;
+pub mod platdev;
 mod types;
 pub mod user_ptr;
 
-pub use crate::error::{Error, KernelResult};
-pub use crate::types::{CStr, Mode};
+#[doc(hidden)]
+pub use build_error::build_error;
+
+pub use crate::error::{Error, Result};
+pub use crate::types::{Mode, ScopeGuard};
 
 /// Page size defined in terms of the `PAGE_SHIFT` macro from C.
 ///
@@ -86,7 +102,7 @@ pub trait KernelModule: Sized + Sync {
     /// should do.
     ///
     /// Equivalent to the `module_init` macro in the C API.
-    fn init() -> KernelResult<Self>;
+    fn init() -> Result<Self>;
 }
 
 /// Equivalent to `THIS_MODULE` in the C API.
@@ -144,6 +160,8 @@ impl<'a> Drop for KParamGuard<'a> {
 /// # Example
 ///
 /// ```
+/// # use kernel::prelude::*;
+/// # use kernel::offset_of;
 /// struct Test {
 ///     a: u64,
 ///     b: u32,
@@ -182,6 +200,8 @@ macro_rules! offset_of {
 /// # Example
 ///
 /// ```
+/// # use kernel::prelude::*;
+/// # use kernel::container_of;
 /// struct Test {
 ///     a: u64,
 ///     b: u32,
@@ -199,9 +219,6 @@ macro_rules! offset_of {
 macro_rules! container_of {
     ($ptr:expr, $type:ty, $($f:tt)*) => {{
         let offset = $crate::offset_of!($type, $($f)*);
-        ($ptr as *const _ as *const u8).offset(-offset) as *const $type
+        unsafe { ($ptr as *const _ as *const u8).offset(-offset) as *const $type }
     }}
 }
-
-#[global_allocator]
-static ALLOCATOR: allocator::KernelAllocator = allocator::KernelAllocator;

@@ -10,7 +10,52 @@ use core::cmp;
 use core::fmt;
 
 use crate::bindings;
-use crate::c_types::c_int;
+use crate::c_types::{c_char, c_void};
+
+// Called from `vsprintf` with format specifier `%pA`.
+#[no_mangle]
+unsafe fn rust_fmt_argument(buf: *mut c_char, end: *mut c_char, ptr: *const c_void) -> *mut c_char {
+    use fmt::Write;
+
+    // Use `usize` to use `saturating_*` functions.
+    struct Writer {
+        buf: usize,
+        end: usize,
+    }
+
+    impl Write for Writer {
+        fn write_str(&mut self, s: &str) -> fmt::Result {
+            // `buf` value after writing `len` bytes. This does not have to be bounded
+            // by `end`, but we don't want it to wrap around to 0.
+            let buf_new = self.buf.saturating_add(s.len());
+
+            // Amount that we can copy. `saturating_sub` ensures we get 0 if
+            // `buf` goes past `end`.
+            let len_to_copy = cmp::min(buf_new, self.end).saturating_sub(self.buf);
+
+            // SAFETY: In any case, `buf` is non-null and properly aligned.
+            // If `len_to_copy` is non-zero, then we know `buf` has not past
+            // `end` yet and so is valid.
+            unsafe {
+                core::ptr::copy_nonoverlapping(
+                    s.as_bytes().as_ptr(),
+                    self.buf as *mut u8,
+                    len_to_copy,
+                )
+            };
+
+            self.buf = buf_new;
+            Ok(())
+        }
+    }
+
+    let mut w = Writer {
+        buf: buf as _,
+        end: end as _,
+    };
+    let _ = w.write_fmt(unsafe { *(ptr as *const fmt::Arguments<'_>) });
+    w.buf as _
+}
 
 /// Format strings.
 ///
@@ -23,7 +68,7 @@ pub mod format_strings {
     const LENGTH_PREFIX: usize = 2;
 
     /// The length of the fixed format strings.
-    pub const LENGTH: usize = 11;
+    pub const LENGTH: usize = 10;
 
     /// Generates a fixed format string for the kernel's [`printk`].
     ///
@@ -42,14 +87,14 @@ pub mod format_strings {
         assert!(prefix[2] == b'\x00');
 
         let suffix: &[u8; LENGTH - LENGTH_PREFIX] = if is_cont {
-            b"%.*s\0\0\0\0\0"
+            b"%pA\0\0\0\0\0"
         } else {
-            b"%s: %.*s\0"
+            b"%s: %pA\0"
         };
 
         [
             prefix[0], prefix[1], suffix[0], suffix[1], suffix[2], suffix[3], suffix[4], suffix[5],
-            suffix[6], suffix[7], suffix[8],
+            suffix[6], suffix[7],
         ]
     }
 
@@ -84,15 +129,16 @@ pub mod format_strings {
 pub unsafe fn call_printk(
     format_string: &[u8; format_strings::LENGTH],
     module_name: &[u8],
-    string: &[u8],
+    args: fmt::Arguments<'_>,
 ) {
     // `printk` does not seem to fail in any path.
-    bindings::printk(
-        format_string.as_ptr() as _,
-        module_name.as_ptr(),
-        string.len() as c_int,
-        string.as_ptr(),
-    );
+    unsafe {
+        bindings::printk(
+            format_string.as_ptr() as _,
+            module_name.as_ptr(),
+            &args as *const _ as *const c_void,
+        );
+    }
 }
 
 /// Prints a message via the kernel's [`printk`] for the `CONT` level.
@@ -101,112 +147,27 @@ pub unsafe fn call_printk(
 ///
 /// [`printk`]: ../../../../include/linux/printk.h
 #[doc(hidden)]
-pub fn call_printk_cont(string: &[u8]) {
+pub fn call_printk_cont(args: fmt::Arguments<'_>) {
     // `printk` does not seem to fail in any path.
     //
     // SAFETY: The format string is fixed.
     unsafe {
         bindings::printk(
             format_strings::CONT.as_ptr() as _,
-            string.len() as c_int,
-            string.as_ptr(),
+            &args as *const _ as *const c_void,
         );
     }
-}
-
-/// The maximum size of a log line in the kernel.
-///
-/// From `kernel/printk/printk.c`.
-const LOG_LINE_MAX: usize = 1024 - 32;
-
-/// The maximum size of a log line in our side.
-///
-/// FIXME: We should be smarter than this, but for the moment, to reduce stack
-/// usage, we only allow this much which should work for most purposes.
-const LOG_LINE_SIZE: usize = 300;
-crate::static_assert!(LOG_LINE_SIZE <= LOG_LINE_MAX);
-
-/// Public but hidden since it should only be used from public macros.
-#[doc(hidden)]
-pub struct LogLineWriter {
-    data: [u8; LOG_LINE_SIZE],
-    pos: usize,
-}
-
-impl LogLineWriter {
-    /// Creates a new [`LogLineWriter`].
-    pub fn new() -> LogLineWriter {
-        LogLineWriter {
-            data: [0u8; LOG_LINE_SIZE],
-            pos: 0,
-        }
-    }
-
-    /// Returns the internal buffer as a byte slice.
-    pub fn as_bytes(&self) -> &[u8] {
-        &self.data[..self.pos]
-    }
-}
-
-impl Default for LogLineWriter {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl fmt::Write for LogLineWriter {
-    fn write_str(&mut self, s: &str) -> fmt::Result {
-        let copy_len = cmp::min(LOG_LINE_SIZE - self.pos, s.as_bytes().len());
-        self.data[self.pos..self.pos + copy_len].copy_from_slice(&s.as_bytes()[..copy_len]);
-        self.pos += copy_len;
-        Ok(())
-    }
-}
-
-/// Helper function for the [`print_macro!`] to reduce stack usage.
-///
-/// Public but hidden since it should only be used from public macros.
-///
-/// # Safety
-///
-/// The format string must be one of the ones in [`format_strings`], and
-/// the module name must be null-terminated.
-#[doc(hidden)]
-pub unsafe fn format_and_call<const CONT: bool>(
-    format_string: &[u8; format_strings::LENGTH],
-    module_name: &[u8],
-    args: fmt::Arguments,
-) {
-    // Careful: this object takes quite a bit of stack.
-    let mut writer = LogLineWriter::new();
-
-    match fmt::write(&mut writer, args) {
-        Ok(_) => {
-            if CONT {
-                call_printk_cont(writer.as_bytes());
-            } else {
-                call_printk(format_string, module_name, writer.as_bytes());
-            }
-        }
-
-        Err(_) => {
-            call_printk(
-                &format_strings::CRIT,
-                module_name,
-                b"Failure to format string.\n",
-            );
-        }
-    };
 }
 
 /// Performs formatting and forwards the string to [`call_printk`].
 ///
 /// Public but hidden since it should only be used from public macros.
 #[doc(hidden)]
+#[cfg(not(testlib))]
 #[macro_export]
 macro_rules! print_macro (
-    // Without extra arguments: no need to format anything.
-    ($format_string:path, false, $fmt:expr) => (
+    // The non-continuation cases (most of them, e.g. `INFO`).
+    ($format_string:path, false, $($arg:tt)+) => (
         // SAFETY: This hidden macro should only be called by the documented
         // printing macros which ensure the format string is one of the fixed
         // ones. All `__LOG_PREFIX`s are null-terminated as they are generated
@@ -216,46 +177,25 @@ macro_rules! print_macro (
             $crate::print::call_printk(
                 &$format_string,
                 crate::__LOG_PREFIX,
-                $fmt.as_bytes(),
+                format_args!($($arg)+),
             );
         }
     );
 
-    // Without extra arguments: no need to format anything (`CONT` case).
-    ($format_string:path, true, $fmt:expr) => (
+    // The `CONT` case.
+    ($format_string:path, true, $($arg:tt)+) => (
         $crate::print::call_printk_cont(
-            $fmt.as_bytes(),
+            format_args!($($arg)+),
         );
     );
+);
 
-    // With extra arguments: we need to perform formatting.
-    ($format_string:path, $cont:literal, $fmt:expr, $($arg:tt)*) => (
-        // Forwarding the call to a function to perform the formatting
-        // is needed here to avoid stack overflows in non-optimized builds when
-        // invoking the printing macros a lot of times in the same function.
-        // Without it, the compiler reserves one `LogLineWriter` per macro
-        // invocation, which is a huge type.
-        //
-        // We could use an immediately-invoked closure for this, which
-        // seems to lower even more the stack usage at `opt-level=0` because
-        // `fmt::Arguments` objects do not pile up. However, that breaks
-        // the `?` operator if used in one of the arguments.
-        //
-        // At `opt-level=2`, the generated code is basically the same for
-        // all alternatives.
-        //
-        // SAFETY: This hidden macro should only be called by the documented
-        // printing macros which ensure the format string is one of the fixed
-        // ones. All `__LOG_PREFIX`s are null-terminated as they are generated
-        // by the `module!` proc macro or fixed values defined in a kernel
-        // crate.
-        unsafe {
-            $crate::print::format_and_call::<$cont>(
-                &$format_string,
-                crate::__LOG_PREFIX,
-                format_args!($fmt, $($arg)*),
-            );
-        }
+/// Stub for doctests
+#[cfg(testlib)]
+#[macro_export]
+macro_rules! print_macro (
+    ($format_string:path, $e:expr, $($arg:tt)+) => (
+        ()
     );
 );
 
@@ -283,6 +223,7 @@ macro_rules! print_macro (
 /// # Examples
 ///
 /// ```
+/// # use kernel::prelude::*;
 /// pr_emerg!("hello {}\n", "there");
 /// ```
 #[macro_export]
@@ -307,6 +248,7 @@ macro_rules! pr_emerg (
 /// # Examples
 ///
 /// ```
+/// # use kernel::prelude::*;
 /// pr_alert!("hello {}\n", "there");
 /// ```
 #[macro_export]
@@ -331,6 +273,7 @@ macro_rules! pr_alert (
 /// # Examples
 ///
 /// ```
+/// # use kernel::prelude::*;
 /// pr_crit!("hello {}\n", "there");
 /// ```
 #[macro_export]
@@ -355,6 +298,7 @@ macro_rules! pr_crit (
 /// # Examples
 ///
 /// ```
+/// # use kernel::prelude::*;
 /// pr_err!("hello {}\n", "there");
 /// ```
 #[macro_export]
@@ -379,6 +323,7 @@ macro_rules! pr_err (
 /// # Examples
 ///
 /// ```
+/// # use kernel::prelude::*;
 /// pr_warn!("hello {}\n", "there");
 /// ```
 #[macro_export]
@@ -403,6 +348,7 @@ macro_rules! pr_warn (
 /// # Examples
 ///
 /// ```
+/// # use kernel::prelude::*;
 /// pr_notice!("hello {}\n", "there");
 /// ```
 #[macro_export]
@@ -427,6 +373,7 @@ macro_rules! pr_notice (
 /// # Examples
 ///
 /// ```
+/// # use kernel::prelude::*;
 /// pr_info!("hello {}\n", "there");
 /// ```
 #[macro_export]
@@ -434,6 +381,35 @@ macro_rules! pr_notice (
 macro_rules! pr_info (
     ($($arg:tt)*) => (
         $crate::print_macro!($crate::print::format_strings::INFO, false, $($arg)*)
+    )
+);
+
+/// Prints a debug-level message (level 7).
+///
+/// Use this level for debug messages.
+///
+/// Equivalent to the kernel's [`pr_debug`] macro, except that it doesn't support dynamic debug
+/// yet.
+///
+/// Mimics the interface of [`std::print!`]. See [`core::fmt`] and
+/// [`alloc::format!`] for information about the formatting syntax.
+///
+/// [`pr_debug`]: https://www.kernel.org/doc/html/latest/core-api/printk-basics.html#c.pr_debug
+/// [`std::print!`]: https://doc.rust-lang.org/std/macro.print.html
+///
+/// # Examples
+///
+/// ```
+/// # use kernel::prelude::*;
+/// pr_debug!("hello {}\n", "there");
+/// ```
+#[macro_export]
+#[doc(alias = "print")]
+macro_rules! pr_debug (
+    ($($arg:tt)*) => (
+        if cfg!(debug_assertions) {
+            $crate::print_macro!($crate::print::format_strings::DEBUG, false, $($arg)*)
+        }
     )
 );
 
@@ -452,6 +428,8 @@ macro_rules! pr_info (
 /// # Examples
 ///
 /// ```
+/// # use kernel::prelude::*;
+/// # use kernel::pr_cont;
 /// pr_info!("hello");
 /// pr_cont!(" {}\n", "there");
 /// ```

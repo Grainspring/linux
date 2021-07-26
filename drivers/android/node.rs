@@ -1,10 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0
 
-use alloc::sync::Arc;
-use core::{
-    pin::Pin,
-    sync::atomic::{AtomicU64, Ordering},
-};
+use core::sync::atomic::{AtomicU64, Ordering};
 use kernel::{
     io_buffer::IoBufferWriter,
     linked_list::{GetLinks, Links, List},
@@ -83,18 +79,20 @@ impl NodeDeath {
             cookie,
             work_links: Links::new(),
             death_links: Links::new(),
-            inner: SpinLock::new(NodeDeathInner {
-                dead: false,
-                cleared: false,
-                notification_done: false,
-                aborted: false,
-            }),
+            inner: unsafe {
+                SpinLock::new(NodeDeathInner {
+                    dead: false,
+                    cleared: false,
+                    notification_done: false,
+                    aborted: false,
+                })
+            },
         }
     }
 
-    pub(crate) fn init(self: Pin<&Self>) {
+    pub(crate) fn init(self: Pin<&mut Self>) {
         // SAFETY: `inner` is pinned when `self` is.
-        let inner = unsafe { self.map_unchecked(|s| &s.inner) };
+        let inner = unsafe { self.map_unchecked_mut(|n| &mut n.inner) };
         kernel::spinlock_init!(inner, "NodeDeath::inner");
     }
 
@@ -170,11 +168,7 @@ impl GetLinks for NodeDeath {
 }
 
 impl DeliverToRead for NodeDeath {
-    fn do_work(
-        self: Arc<Self>,
-        _thread: &Thread,
-        writer: &mut UserSlicePtrWriter,
-    ) -> KernelResult<bool> {
+    fn do_work(self: Arc<Self>, _thread: &Thread, writer: &mut UserSlicePtrWriter) -> Result<bool> {
         let done = {
             let inner = self.inner.lock();
             if inner.aborted {
@@ -216,13 +210,14 @@ pub(crate) struct Node {
     pub(crate) global_id: u64,
     ptr: usize,
     cookie: usize,
+    pub(crate) flags: u32,
     pub(crate) owner: Ref<Process>,
     inner: LockedBy<NodeInner, Mutex<ProcessInner>>,
     links: Links<dyn DeliverToRead>,
 }
 
 impl Node {
-    pub(crate) fn new(ptr: usize, cookie: usize, owner: Ref<Process>) -> Self {
+    pub(crate) fn new(ptr: usize, cookie: usize, flags: u32, owner: Ref<Process>) -> Self {
         static NEXT_ID: AtomicU64 = AtomicU64::new(1);
         let inner = LockedBy::new(
             &owner.inner,
@@ -236,6 +231,7 @@ impl Node {
             global_id: NEXT_ID.fetch_add(1, Ordering::Relaxed),
             ptr,
             cookie,
+            flags,
             owner,
             inner,
             links: Links::new(),
@@ -248,12 +244,16 @@ impl Node {
 
     pub(crate) fn next_death(
         &self,
-        guard: &mut Guard<Mutex<ProcessInner>>,
+        guard: &mut Guard<'_, Mutex<ProcessInner>>,
     ) -> Option<Arc<NodeDeath>> {
         self.inner.access_mut(guard).death_list.pop_front()
     }
 
-    pub(crate) fn add_death(&self, death: Arc<NodeDeath>, guard: &mut Guard<Mutex<ProcessInner>>) {
+    pub(crate) fn add_death(
+        &self,
+        death: Arc<NodeDeath>,
+        guard: &mut Guard<'_, Mutex<ProcessInner>>,
+    ) {
         self.inner.access_mut(guard).death_list.push_back(death);
     }
 
@@ -306,7 +306,7 @@ impl Node {
     pub(crate) fn populate_counts(
         &self,
         out: &mut BinderNodeInfoForRef,
-        guard: &Guard<Mutex<ProcessInner>>,
+        guard: &Guard<'_, Mutex<ProcessInner>>,
     ) {
         let inner = self.inner.access(guard);
         out.strong_count = inner.strong.count as _;
@@ -316,11 +316,11 @@ impl Node {
     pub(crate) fn populate_debug_info(
         &self,
         out: &mut BinderNodeDebugInfo,
-        guard: &Guard<Mutex<ProcessInner>>,
+        guard: &Guard<'_, Mutex<ProcessInner>>,
     ) {
         out.ptr = self.ptr as _;
         out.cookie = self.cookie as _;
-        let inner = self.inner.access(&guard);
+        let inner = self.inner.access(guard);
         if inner.strong.has_count {
             out.has_strong_ref = 1;
         }
@@ -329,13 +329,13 @@ impl Node {
         }
     }
 
-    pub(crate) fn force_has_count(&self, guard: &mut Guard<Mutex<ProcessInner>>) {
+    pub(crate) fn force_has_count(&self, guard: &mut Guard<'_, Mutex<ProcessInner>>) {
         let inner = self.inner.access_mut(guard);
         inner.strong.has_count = true;
         inner.weak.has_count = true;
     }
 
-    fn write(&self, writer: &mut UserSlicePtrWriter, code: u32) -> KernelResult {
+    fn write(&self, writer: &mut UserSlicePtrWriter, code: u32) -> Result {
         writer.write(&code)?;
         writer.write(&self.ptr)?;
         writer.write(&self.cookie)?;
@@ -344,11 +344,7 @@ impl Node {
 }
 
 impl DeliverToRead for Node {
-    fn do_work(
-        self: Arc<Self>,
-        _thread: &Thread,
-        writer: &mut UserSlicePtrWriter,
-    ) -> KernelResult<bool> {
+    fn do_work(self: Arc<Self>, _thread: &Thread, writer: &mut UserSlicePtrWriter) -> Result<bool> {
         let mut owner_inner = self.owner.inner.lock();
         let inner = self.inner.access_mut(&mut owner_inner);
         let strong = inner.strong.count > 0;

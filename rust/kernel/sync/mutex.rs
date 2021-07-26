@@ -5,7 +5,8 @@
 //! This module allows Rust code to use the kernel's [`struct mutex`].
 
 use super::{Guard, Lock, NeedsLockClass};
-use crate::{bindings, CStr};
+use crate::bindings;
+use crate::str::CStr;
 use core::{cell::UnsafeCell, marker::PhantomPinned, pin::Pin};
 
 /// Safely initialises a [`Mutex`] with the given name, generating a new lock class.
@@ -63,7 +64,7 @@ impl<T> Mutex<T> {
 impl<T: ?Sized> Mutex<T> {
     /// Locks the mutex and gives the caller access to the data protected by it. Only one thread at
     /// a time is allowed to access the protected data.
-    pub fn lock(&self) -> Guard<Self> {
+    pub fn lock(&self) -> Guard<'_, Self> {
         self.lock_noguard();
         // SAFETY: The mutex was just acquired.
         unsafe { Guard::new(self) }
@@ -71,28 +72,27 @@ impl<T: ?Sized> Mutex<T> {
 }
 
 impl<T: ?Sized> NeedsLockClass for Mutex<T> {
-    unsafe fn init(self: Pin<&Self>, name: CStr<'static>, key: *mut bindings::lock_class_key) {
-        bindings::__mutex_init(self.mutex.get(), name.as_ptr() as _, key);
+    unsafe fn init(self: Pin<&mut Self>, name: &'static CStr, key: *mut bindings::lock_class_key) {
+        unsafe { bindings::__mutex_init(self.mutex.get(), name.as_char_ptr(), key) };
     }
+}
+
+extern "C" {
+    fn rust_helper_mutex_lock(mutex: *mut bindings::mutex);
 }
 
 impl<T: ?Sized> Lock for Mutex<T> {
     type Inner = T;
 
-    #[cfg(not(CONFIG_DEBUG_LOCK_ALLOC))]
     fn lock_noguard(&self) {
         // SAFETY: `mutex` points to valid memory.
-        unsafe { bindings::mutex_lock(self.mutex.get()) };
-    }
-
-    #[cfg(CONFIG_DEBUG_LOCK_ALLOC)]
-    fn lock_noguard(&self) {
-        // SAFETY: `mutex` points to valid memory.
-        unsafe { bindings::mutex_lock_nested(self.mutex.get(), 0) };
+        unsafe {
+            rust_helper_mutex_lock(self.mutex.get());
+        }
     }
 
     unsafe fn unlock(&self) {
-        bindings::mutex_unlock(self.mutex.get());
+        unsafe { bindings::mutex_unlock(self.mutex.get()) };
     }
 
     fn locked_data(&self) -> &UnsafeCell<T> {

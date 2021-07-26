@@ -7,14 +7,13 @@
 #![no_std]
 #![feature(global_asm, try_reserve, allocator_api, concat_idents)]
 
-use alloc::{boxed::Box, sync::Arc};
-use core::pin::Pin;
 use kernel::{
-    cstr,
+    c_str,
     io_buffer::IoBufferWriter,
     linked_list::{GetLinks, GetLinksWrapped, Links},
     miscdev::Registration,
     prelude::*,
+    sync::Ref,
     user_ptr::UserSlicePtrWriter,
 };
 
@@ -46,11 +45,7 @@ trait DeliverToRead {
     /// Performs work. Returns true if remaining work items in the queue should be processed
     /// immediately, or false if it should return to caller before processing additional work
     /// items.
-    fn do_work(
-        self: Arc<Self>,
-        thread: &Thread,
-        writer: &mut UserSlicePtrWriter,
-    ) -> KernelResult<bool>;
+    fn do_work(self: Arc<Self>, thread: &Thread, writer: &mut UserSlicePtrWriter) -> Result<bool>;
 
     /// Cancels the given work item. This is called instead of [`DeliverToRead::do_work`] when work
     /// won't be delivered.
@@ -89,11 +84,7 @@ impl DeliverCode {
 }
 
 impl DeliverToRead for DeliverCode {
-    fn do_work(
-        self: Arc<Self>,
-        _thread: &Thread,
-        writer: &mut UserSlicePtrWriter,
-    ) -> KernelResult<bool> {
+    fn do_work(self: Arc<Self>, _thread: &Thread, writer: &mut UserSlicePtrWriter) -> Result<bool> {
         writer.write(&self.code)?;
         Ok(true)
     }
@@ -111,18 +102,13 @@ const fn ptr_align(value: usize) -> usize {
 unsafe impl Sync for BinderModule {}
 
 struct BinderModule {
-    _reg: Pin<Box<Registration<Arc<Context>>>>,
+    _reg: Pin<Box<Registration<Ref<Context>>>>,
 }
 
 impl KernelModule for BinderModule {
-    fn init() -> KernelResult<Self> {
-        let pinned_ctx = Context::new()?;
-        let ctx = unsafe { Pin::into_inner_unchecked(pinned_ctx) };
-        let reg = Registration::<Arc<Context>>::new_pinned::<process::Process>(
-            cstr!("rust_binder"),
-            None,
-            ctx,
-        )?;
+    fn init() -> Result<Self> {
+        let ctx = Context::new()?;
+        let reg = Registration::new_pinned::<process::Process>(c_str!("rust_binder"), None, ctx)?;
         Ok(Self { _reg: reg })
     }
 }

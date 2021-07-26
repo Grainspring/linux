@@ -6,7 +6,7 @@
 //! variable.
 
 use super::{Guard, Lock, NeedsLockClass};
-use crate::{bindings, CStr};
+use crate::{bindings, str::CStr, task::Task};
 use core::{cell::UnsafeCell, marker::PhantomPinned, mem::MaybeUninit, pin::Pin};
 
 extern "C" {
@@ -64,7 +64,7 @@ impl CondVar {
     ///
     /// Returns whether there is a signal pending.
     #[must_use = "wait returns if a signal is pending, so the caller must check the return value"]
-    pub fn wait<L: Lock>(&self, guard: &mut Guard<L>) -> bool {
+    pub fn wait<L: Lock>(&self, guard: &mut Guard<'_, L>) -> bool {
         let lock = guard.lock;
         let mut wait = MaybeUninit::<bindings::wait_queue_entry>::uninit();
 
@@ -91,7 +91,7 @@ impl CondVar {
         // SAFETY: Both `wait` and `wait_list` point to valid memory.
         unsafe { bindings::finish_wait(self.wait_list.get(), wait.as_mut_ptr()) };
 
-        super::signal_pending()
+        Task::current().signal_pending()
     }
 
     /// Calls the kernel function to notify the appropriate number of threads with the given flags.
@@ -130,7 +130,7 @@ impl CondVar {
 }
 
 impl NeedsLockClass for CondVar {
-    unsafe fn init(self: Pin<&Self>, name: CStr<'static>, key: *mut bindings::lock_class_key) {
-        bindings::__init_waitqueue_head(self.wait_list.get(), name.as_ptr() as _, key);
+    unsafe fn init(self: Pin<&mut Self>, name: &'static CStr, key: *mut bindings::lock_class_key) {
+        unsafe { bindings::__init_waitqueue_head(self.wait_list.get(), name.as_char_ptr(), key) };
     }
 }

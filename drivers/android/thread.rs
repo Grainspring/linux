@@ -1,7 +1,10 @@
 // SPDX-License-Identifier: GPL-2.0
 
-use alloc::sync::Arc;
-use core::{alloc::AllocError, mem::size_of, pin::Pin};
+use core::{
+    alloc::AllocError,
+    mem::size_of,
+    sync::atomic::{AtomicU32, Ordering},
+};
 use kernel::{
     bindings,
     file::File,
@@ -9,9 +12,9 @@ use kernel::{
     io_buffer::{IoBufferReader, IoBufferWriter},
     linked_list::{GetLinks, Links, List},
     prelude::*,
+    security,
     sync::{CondVar, Ref, SpinLock},
     user_ptr::{UserSlicePtr, UserSlicePtrWriter},
-    Error,
 };
 
 use crate::{
@@ -19,11 +22,11 @@ use crate::{
     defs::*,
     process::{AllocationInfo, Process},
     ptr_align,
-    transaction::Transaction,
+    transaction::{FileInfo, Transaction},
     DeliverCode, DeliverToRead, DeliverToReadListAdapter, Either,
 };
 
-pub(crate) type BinderResult<T = ()> = Result<T, BinderError>;
+pub(crate) type BinderResult<T = ()> = core::result::Result<T, BinderError>;
 
 pub(crate) struct BinderError {
     pub(crate) reply: u32,
@@ -121,11 +124,13 @@ impl InnerThread {
     fn push_existing_work(&mut self, owork: Option<Arc<ThreadError>>, code: u32) {
         // TODO: Write some warning when the following fails. It should not happen, and
         // if it does, there is likely something wrong.
-        if let Some(mut work) = owork {
-            if let Some(work_mut) = Arc::get_mut(&mut work) {
-                work_mut.error_code = code;
-                self.push_work(work);
-            }
+        if let Some(work) = owork {
+            // `error_code` is written to with relaxed semantics because the queue onto which it is
+            // being inserted is protected by a lock. The release barrier when the lock is released
+            // by the caller matches with the acquire barrier of the future reader to guarantee
+            // that `error_code` is visible.
+            work.error_code.store(code, Ordering::Relaxed);
+            self.push_work(work);
         }
     }
 
@@ -157,7 +162,7 @@ impl InnerThread {
     /// Fetches the transaction the thread can reply to. If the thread has a pending transaction
     /// (that it could respond to) but it has also issued a transaction, it must first wait for the
     /// previously-issued transaction to complete.
-    fn pop_transaction_to_reply(&mut self, thread: &Thread) -> KernelResult<Arc<Transaction>> {
+    fn pop_transaction_to_reply(&mut self, thread: &Thread) -> Result<Arc<Transaction>> {
         let transaction = self.current_transaction.take().ok_or(Error::EINVAL)?;
 
         if core::ptr::eq(thread, transaction.from.as_ref()) {
@@ -233,7 +238,7 @@ pub(crate) struct Thread {
 }
 
 impl Thread {
-    pub(crate) fn new(id: i32, process: Ref<Process>) -> KernelResult<Arc<Self>> {
+    pub(crate) fn new(id: i32, process: Ref<Process>) -> Result<Arc<Self>> {
         let return_work = Arc::try_new(ThreadError::new(InnerThread::set_return_work))?;
         let reply_work = Arc::try_new(ThreadError::new(InnerThread::set_reply_work))?;
         let mut arc = Arc::try_new(Self {
@@ -245,21 +250,20 @@ impl Thread {
             work_condvar: unsafe { CondVar::new() },
             links: Links::new(),
         })?;
+        let thread = Arc::get_mut(&mut arc).unwrap();
+        // SAFETY: `inner` is pinned behind the `Arc` reference.
+        let inner = unsafe { Pin::new_unchecked(&mut thread.inner) };
+        kernel::spinlock_init!(inner, "Thread::inner");
+
+        // SAFETY: `work_condvar` is pinned behind the `Arc` reference.
+        let condvar = unsafe { Pin::new_unchecked(&mut thread.work_condvar) };
+        kernel::condvar_init!(condvar, "Thread::work_condvar");
         {
             let mut inner = arc.inner.lock();
             inner.set_reply_work(reply_work);
             inner.set_return_work(return_work);
         }
-        let thread = Arc::get_mut(&mut arc).unwrap();
-        // SAFETY: `inner` is pinned behind the `Arc` reference.
-        let inner = unsafe { Pin::new_unchecked(&thread.inner) };
-        kernel::spinlock_init!(inner, "Thread::inner");
-        kernel::condvar_init!(thread.pinned_condvar(), "Thread::work_condvar");
         Ok(arc)
-    }
-
-    fn pinned_condvar(&self) -> Pin<&CondVar> {
-        unsafe { Pin::new_unchecked(&self.work_condvar) }
     }
 
     pub(crate) fn set_current_transaction(&self, transaction: Arc<Transaction>) {
@@ -269,14 +273,13 @@ impl Thread {
     /// Attempts to fetch a work item from the thread-local queue. The behaviour if the queue is
     /// empty depends on `wait`: if it is true, the function waits for some work to be queued (or a
     /// signal); otherwise it returns indicating that none is available.
-    fn get_work_local(self: &Arc<Self>, wait: bool) -> KernelResult<Arc<dyn DeliverToRead>> {
+    fn get_work_local(self: &Arc<Self>, wait: bool) -> Result<Arc<dyn DeliverToRead>> {
         // Try once if the caller does not want to wait.
         if !wait {
             return self.inner.lock().pop_work().ok_or(Error::EAGAIN);
         }
 
         // Loop waiting only on the local queue (i.e., not registering with the process queue).
-        let cv = self.pinned_condvar();
         let mut inner = self.inner.lock();
         loop {
             if let Some(work) = inner.pop_work() {
@@ -284,7 +287,7 @@ impl Thread {
             }
 
             inner.looper_flags |= LOOPER_WAITING;
-            let signal_pending = cv.wait(&mut inner);
+            let signal_pending = self.work_condvar.wait(&mut inner);
             inner.looper_flags &= !LOOPER_WAITING;
 
             if signal_pending {
@@ -298,7 +301,7 @@ impl Thread {
     ///
     /// This must only be called when the thread is not participating in a transaction chain. If it
     /// is, the local version (`get_work_local`) should be used instead.
-    fn get_work(self: &Arc<Self>, wait: bool) -> KernelResult<Arc<dyn DeliverToRead>> {
+    fn get_work(self: &Arc<Self>, wait: bool) -> Result<Arc<dyn DeliverToRead>> {
         // Try to get work from the thread's work queue, using only a local lock.
         {
             let mut inner = self.inner.lock();
@@ -321,7 +324,6 @@ impl Thread {
             Either::Right(reg) => reg,
         };
 
-        let cv = self.pinned_condvar();
         let mut inner = self.inner.lock();
         loop {
             if let Some(work) = inner.pop_work() {
@@ -329,7 +331,7 @@ impl Thread {
             }
 
             inner.looper_flags |= LOOPER_WAITING;
-            let signal_pending = cv.wait(&mut inner);
+            let signal_pending = self.work_condvar.wait(&mut inner);
             inner.looper_flags &= !LOOPER_WAITING;
 
             if signal_pending {
@@ -352,7 +354,7 @@ impl Thread {
             }
             inner.push_work(work);
         }
-        self.pinned_condvar().notify_one();
+        self.work_condvar.notify_one();
         Ok(())
     }
 
@@ -376,39 +378,72 @@ impl Thread {
     fn translate_object(
         &self,
         index_offset: usize,
-        alloc: &Allocation,
-        view: &AllocationView,
+        view: &mut AllocationView<'_, '_>,
+        allow_fds: bool,
     ) -> BinderResult {
-        let offset = alloc.read(index_offset)?;
+        let offset = view.alloc.read(index_offset)?;
         let header = view.read::<bindings::binder_object_header>(offset)?;
         // TODO: Handle other types.
         match header.type_ {
-            bindings::BINDER_TYPE_WEAK_BINDER | bindings::BINDER_TYPE_BINDER => {
-                let strong = header.type_ == bindings::BINDER_TYPE_BINDER;
+            BINDER_TYPE_WEAK_BINDER | BINDER_TYPE_BINDER => {
+                let strong = header.type_ == BINDER_TYPE_BINDER;
                 view.transfer_binder_object(offset, strong, |obj| {
-                    // SAFETY: The type is `BINDER_TYPE_{WEAK_}BINDER`, so `binder` is populated.
+                    // SAFETY: `binder` is a `binder_uintptr_t`; any bit pattern is a valid
+                    // representation.
                     let ptr = unsafe { obj.__bindgen_anon_1.binder } as _;
                     let cookie = obj.cookie as _;
-                    Ok(self.process.get_node(ptr, cookie, strong, Some(self))?)
+                    let flags = obj.flags as _;
+                    let node = self
+                        .process
+                        .get_node(ptr, cookie, flags, strong, Some(self))?;
+                    security::binder_transfer_binder(&self.process.task, &view.alloc.process.task)?;
+                    Ok(node)
                 })?;
             }
-            bindings::BINDER_TYPE_WEAK_HANDLE | bindings::BINDER_TYPE_HANDLE => {
-                let strong = header.type_ == bindings::BINDER_TYPE_HANDLE;
+            BINDER_TYPE_WEAK_HANDLE | BINDER_TYPE_HANDLE => {
+                let strong = header.type_ == BINDER_TYPE_HANDLE;
                 view.transfer_binder_object(offset, strong, |obj| {
-                    // SAFETY: The type is `BINDER_TYPE_{WEAK_}HANDLE`, so `handle` is populated.
+                    // SAFETY: `handle` is a `u32`; any bit pattern is a valid representation.
                     let handle = unsafe { obj.__bindgen_anon_1.handle } as _;
-                    self.process.get_node_from_handle(handle, strong)
+                    let node = self.process.get_node_from_handle(handle, strong)?;
+                    security::binder_transfer_binder(&self.process.task, &view.alloc.process.task)?;
+                    Ok(node)
                 })?;
+            }
+            BINDER_TYPE_FD => {
+                if !allow_fds {
+                    return Err(BinderError::new_failed());
+                }
+
+                let obj = view.read::<bindings::binder_fd_object>(offset)?;
+                // SAFETY: `fd` is a `u32`; any bit pattern is a valid representation.
+                let fd = unsafe { obj.__bindgen_anon_1.fd };
+                let file = File::from_fd(fd)?;
+                security::binder_transfer_file(
+                    &self.process.task,
+                    &view.alloc.process.task,
+                    &file,
+                )?;
+                let field_offset =
+                    kernel::offset_of!(bindings::binder_fd_object, __bindgen_anon_1.fd) as usize;
+                let file_info = Box::try_new(FileInfo::new(file, offset + field_offset))?;
+                view.alloc.add_file_info(file_info);
             }
             _ => pr_warn!("Unsupported binder object type: {:x}\n", header.type_),
         }
         Ok(())
     }
 
-    fn translate_objects(&self, alloc: &mut Allocation, start: usize, end: usize) -> BinderResult {
-        let view = AllocationView::new(&alloc, start);
+    fn translate_objects(
+        &self,
+        alloc: &mut Allocation<'_>,
+        start: usize,
+        end: usize,
+        allow_fds: bool,
+    ) -> BinderResult {
+        let mut view = AllocationView::new(alloc, start);
         for i in (start..end).step_by(size_of::<usize>()) {
-            if let Err(err) = self.translate_object(i, alloc, &view) {
+            if let Err(err) = self.translate_object(i, &mut view, allow_fds) {
                 alloc.set_info(AllocationInfo { offsets: start..i });
                 return Err(err);
             }
@@ -423,6 +458,7 @@ impl Thread {
         &self,
         to_process: &'a Process,
         tr: &BinderTransactionData,
+        allow_fds: bool,
     ) -> BinderResult<Allocation<'a>> {
         let data_size = tr.data_size as _;
         let adata_size = ptr_align(data_size);
@@ -447,7 +483,12 @@ impl Thread {
             alloc.copy_into(&mut reader, adata_size, offsets_size)?;
 
             // Traverse the objects specified.
-            self.translate_objects(&mut alloc, adata_size, adata_size + aoffsets_size)?;
+            self.translate_objects(
+                &mut alloc,
+                adata_size,
+                adata_size + aoffsets_size,
+                allow_fds,
+            )?;
         }
 
         Ok(alloc)
@@ -505,7 +546,7 @@ impl Thread {
         }
 
         // Notify the thread now that we've released the inner lock.
-        self.pinned_condvar().notify_one();
+        self.work_condvar.notify_one();
         false
     }
 
@@ -537,7 +578,8 @@ impl Thread {
         (|| -> BinderResult<_> {
             let completion = Arc::try_new(DeliverCode::new(BR_TRANSACTION_COMPLETE))?;
             let process = orig.from.process.clone();
-            let reply = Arc::try_new(Transaction::new_reply(self, process, tr)?)?;
+            let allow_fds = orig.flags & TF_ACCEPT_FDS != 0;
+            let reply = Transaction::new_reply(self, process, tr, allow_fds)?;
             self.inner.lock().push_work(completion);
             orig.from.deliver_reply(Either::Left(reply), &orig);
             Ok(())
@@ -555,7 +597,7 @@ impl Thread {
     /// Determines the current top of the transaction stack. It fails if the top is in another
     /// thread (i.e., this thread belongs to a stack but it has called another thread). The top is
     /// [`None`] if the thread is not currently participating in a transaction stack.
-    fn top_of_transaction_stack(&self) -> KernelResult<Option<Arc<Transaction>>> {
+    fn top_of_transaction_stack(&self) -> Result<Option<Arc<Transaction>>> {
         let inner = self.inner.lock();
         Ok(if let Some(cur) = &inner.current_transaction {
             if core::ptr::eq(self, cur.from.as_ref()) {
@@ -570,8 +612,9 @@ impl Thread {
     fn oneway_transaction_inner(self: &Arc<Self>, tr: &BinderTransactionData) -> BinderResult {
         let handle = unsafe { tr.target.handle };
         let node_ref = self.process.get_transaction_node(handle)?;
+        security::binder_transaction(&self.process.task, &node_ref.node.owner.task)?;
         let completion = Arc::try_new(DeliverCode::new(BR_TRANSACTION_COMPLETE))?;
-        let transaction = Arc::try_new(Transaction::new(node_ref, None, self, tr)?)?;
+        let transaction = Transaction::new(node_ref, None, self, tr)?;
         self.inner.lock().push_work(completion);
         // TODO: Remove the completion on error?
         transaction.submit()?;
@@ -581,11 +624,12 @@ impl Thread {
     fn transaction_inner(self: &Arc<Self>, tr: &BinderTransactionData) -> BinderResult {
         let handle = unsafe { tr.target.handle };
         let node_ref = self.process.get_transaction_node(handle)?;
+        security::binder_transaction(&self.process.task, &node_ref.node.owner.task)?;
         // TODO: We need to ensure that there isn't a pending transaction in the work queue. How
         // could this happen?
         let top = self.top_of_transaction_stack()?;
         let completion = Arc::try_new(DeliverCode::new(BR_TRANSACTION_COMPLETE))?;
-        let transaction = Arc::try_new(Transaction::new(node_ref, top, self, tr)?)?;
+        let transaction = Transaction::new(node_ref, top, self, tr)?;
 
         // Check that the transaction stack hasn't changed while the lock was released, then update
         // it with the new transaction.
@@ -605,7 +649,7 @@ impl Thread {
         Ok(())
     }
 
-    fn write(self: &Arc<Self>, req: &mut BinderWriteRead) -> KernelResult {
+    fn write(self: &Arc<Self>, req: &mut BinderWriteRead) -> Result {
         let write_start = req.write_buffer.wrapping_add(req.write_consumed);
         let write_len = req.write_size - req.write_consumed;
         let mut reader = unsafe { UserSlicePtr::new(write_start as _, write_len as _).reader() };
@@ -615,7 +659,7 @@ impl Thread {
             match reader.read::<u32>()? {
                 BC_TRANSACTION => {
                     let tr = reader.read::<BinderTransactionData>()?;
-                    if tr.flags & bindings::transaction_flags_TF_ONE_WAY != 0 {
+                    if tr.flags & TF_ONE_WAY != 0 {
                         self.transaction(&tr, Self::oneway_transaction_inner)
                     } else {
                         self.transaction(&tr, Self::transaction_inner)
@@ -650,7 +694,7 @@ impl Thread {
         Ok(())
     }
 
-    fn read(self: &Arc<Self>, req: &mut BinderWriteRead, wait: bool) -> KernelResult {
+    fn read(self: &Arc<Self>, req: &mut BinderWriteRead, wait: bool) -> Result {
         let read_start = req.read_buffer.wrapping_add(req.read_consumed);
         let read_len = req.read_size - req.read_consumed;
         let mut writer = unsafe { UserSlicePtr::new(read_start as _, read_len as _) }.writer();
@@ -704,7 +748,7 @@ impl Thread {
         Ok(())
     }
 
-    pub(crate) fn write_read(self: &Arc<Self>, data: UserSlicePtr, wait: bool) -> KernelResult {
+    pub(crate) fn write_read(self: &Arc<Self>, data: UserSlicePtr, wait: bool) -> Result {
         let (mut reader, mut writer) = data.reader_writer();
         let mut req = reader.read::<BinderWriteRead>()?;
 
@@ -748,7 +792,7 @@ impl Thread {
 
         // Now that the lock is no longer held, notify the waiters if we have to.
         if notify {
-            self.pinned_condvar().notify_one();
+            self.work_condvar.notify_one();
         }
     }
 
@@ -771,7 +815,7 @@ impl Thread {
         // Remove epoll items if polling was ever used on the thread.
         let poller = self.inner.lock().looper_flags & LOOPER_POLL != 0;
         if poller {
-            self.pinned_condvar().free_waiters();
+            self.work_condvar.free_waiters();
 
             unsafe { bindings::synchronize_rcu() };
         }
@@ -786,7 +830,7 @@ impl GetLinks for Thread {
 }
 
 struct ThreadError {
-    error_code: u32,
+    error_code: AtomicU32,
     return_fn: fn(&mut InnerThread, Arc<ThreadError>),
     links: Links<dyn DeliverToRead>,
 }
@@ -794,7 +838,7 @@ struct ThreadError {
 impl ThreadError {
     fn new(return_fn: fn(&mut InnerThread, Arc<ThreadError>)) -> Self {
         Self {
-            error_code: BR_OK,
+            error_code: AtomicU32::new(BR_OK),
             return_fn,
             links: Links::new(),
         }
@@ -802,12 +846,10 @@ impl ThreadError {
 }
 
 impl DeliverToRead for ThreadError {
-    fn do_work(
-        self: Arc<Self>,
-        thread: &Thread,
-        writer: &mut UserSlicePtrWriter,
-    ) -> KernelResult<bool> {
-        let code = self.error_code;
+    fn do_work(self: Arc<Self>, thread: &Thread, writer: &mut UserSlicePtrWriter) -> Result<bool> {
+        // See `ThreadInner::push_existing_work` for the reason why `error_code` is up to date even
+        // though we use relaxed semantics.
+        let code = self.error_code.load(Ordering::Relaxed);
 
         // Return the `ThreadError` to the thread.
         (self.return_fn)(&mut *thread.inner.lock(), self);

@@ -15,6 +15,7 @@ use core::sync::atomic;
 use crate::{
     bindings, c_types, error,
     io_buffer::IoBufferWriter,
+    str::CStr,
     types,
     user_ptr::{UserSlicePtr, UserSlicePtrWriter},
 };
@@ -22,10 +23,10 @@ use crate::{
 /// Sysctl storage.
 pub trait SysctlStorage: Sync {
     /// Writes a byte slice.
-    fn store_value(&self, data: &[u8]) -> (usize, error::KernelResult);
+    fn store_value(&self, data: &[u8]) -> (usize, error::Result);
 
     /// Reads via a [`UserSlicePtrWriter`].
-    fn read_value(&self, data: &mut UserSlicePtrWriter) -> (usize, error::KernelResult);
+    fn read_value(&self, data: &mut UserSlicePtrWriter) -> (usize, error::Result);
 }
 
 fn trim_whitespace(mut data: &[u8]) -> &[u8] {
@@ -46,17 +47,17 @@ impl<T> SysctlStorage for &T
 where
     T: SysctlStorage,
 {
-    fn store_value(&self, data: &[u8]) -> (usize, error::KernelResult) {
+    fn store_value(&self, data: &[u8]) -> (usize, error::Result) {
         (*self).store_value(data)
     }
 
-    fn read_value(&self, data: &mut UserSlicePtrWriter) -> (usize, error::KernelResult) {
+    fn read_value(&self, data: &mut UserSlicePtrWriter) -> (usize, error::Result) {
         (*self).read_value(data)
     }
 }
 
 impl SysctlStorage for atomic::AtomicBool {
-    fn store_value(&self, data: &[u8]) -> (usize, error::KernelResult) {
+    fn store_value(&self, data: &[u8]) -> (usize, error::Result) {
         let result = match trim_whitespace(data) {
             b"0" => {
                 self.store(false, atomic::Ordering::Relaxed);
@@ -71,7 +72,7 @@ impl SysctlStorage for atomic::AtomicBool {
         (data.len(), result)
     }
 
-    fn read_value(&self, data: &mut UserSlicePtrWriter) -> (usize, error::KernelResult) {
+    fn read_value(&self, data: &mut UserSlicePtrWriter) -> (usize, error::Result) {
         let value = if self.load(atomic::Ordering::Relaxed) {
             b"1\n"
         } else {
@@ -102,13 +103,13 @@ unsafe extern "C" fn proc_handler<T: SysctlStorage>(
 ) -> c_types::c_int {
     // If we are reading from some offset other than the beginning of the file,
     // return an empty read to signal EOF.
-    if *ppos != 0 && write == 0 {
-        *len = 0;
+    if unsafe { *ppos } != 0 && write == 0 {
+        unsafe { *len = 0 };
         return 0;
     }
 
-    let data = UserSlicePtr::new(buffer, *len);
-    let storage = &*((*ctl).data as *const T);
+    let data = unsafe { UserSlicePtr::new(buffer, *len) };
+    let storage = unsafe { &*((*ctl).data as *const T) };
     let (bytes_processed, result) = if write != 0 {
         let data = match data.read_all() {
             Ok(r) => r,
@@ -119,8 +120,8 @@ unsafe extern "C" fn proc_handler<T: SysctlStorage>(
         let mut writer = data.writer();
         storage.read_value(&mut writer)
     };
-    *len = bytes_processed;
-    *ppos += *len as bindings::loff_t;
+    unsafe { *len = bytes_processed };
+    unsafe { *ppos += *len as bindings::loff_t };
     match result {
         Ok(()) => 0,
         Err(e) => e.to_kernel_errno(),
@@ -130,19 +131,19 @@ unsafe extern "C" fn proc_handler<T: SysctlStorage>(
 impl<T: SysctlStorage> Sysctl<T> {
     /// Registers a single entry in `sysctl`.
     pub fn register(
-        path: types::CStr<'static>,
-        name: types::CStr<'static>,
+        path: &'static CStr,
+        name: &'static CStr,
         storage: T,
         mode: types::Mode,
-    ) -> error::KernelResult<Sysctl<T>> {
-        if name.contains('/') {
+    ) -> error::Result<Sysctl<T>> {
+        if name.contains(&b'/') {
             return Err(error::Error::EINVAL);
         }
 
         let storage = Box::try_new(storage)?;
         let mut table = vec![
             bindings::ctl_table {
-                procname: name.as_ptr() as *const i8,
+                procname: name.as_char_ptr(),
                 mode: mode.as_int(),
                 data: &*storage as *const T as *mut c_types::c_void,
                 proc_handler: Some(proc_handler::<T>),
@@ -155,10 +156,9 @@ impl<T: SysctlStorage> Sysctl<T> {
             },
             unsafe { mem::zeroed() },
         ]
-        .into_boxed_slice();
+        .try_into_boxed_slice()?;
 
-        let result =
-            unsafe { bindings::register_sysctl(path.as_ptr() as *const i8, table.as_mut_ptr()) };
+        let result = unsafe { bindings::register_sysctl(path.as_char_ptr(), table.as_mut_ptr()) };
         if result.is_null() {
             return Err(error::Error::ENOMEM);
         }
@@ -182,5 +182,17 @@ impl<T: SysctlStorage> Drop for Sysctl<T> {
             bindings::unregister_sysctl_table(self.header);
         }
         self.header = ptr::null_mut();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_trim_whitespace() {
+        assert_eq!(trim_whitespace(b"foo    "), b"foo");
+        assert_eq!(trim_whitespace(b"    foo"), b"foo");
+        assert_eq!(trim_whitespace(b"  foo  "), b"foo");
     }
 }

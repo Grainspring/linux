@@ -14,18 +14,18 @@ unsafe impl GlobalAlloc for KernelAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         // `krealloc()` is used instead of `kmalloc()` because the latter is
         // an inline function and cannot be bound to as a result.
-        bindings::krealloc(ptr::null(), layout.size(), bindings::GFP_KERNEL) as *mut u8
+        unsafe { bindings::krealloc(ptr::null(), layout.size(), bindings::GFP_KERNEL) as *mut u8 }
     }
 
     unsafe fn dealloc(&self, ptr: *mut u8, _layout: Layout) {
-        bindings::kfree(ptr as *const c_types::c_void);
+        unsafe {
+            bindings::kfree(ptr as *const c_types::c_void);
+        }
     }
 }
 
-#[alloc_error_handler]
-fn oom(_layout: Layout) -> ! {
-    panic!("Out of memory!");
-}
+#[global_allocator]
+static ALLOCATOR: KernelAllocator = KernelAllocator;
 
 // `rustc` only generates these for some crate types. Even then, we would need
 // to extract the object file that has them from the archive. For the moment,
@@ -60,9 +60,4 @@ pub fn __rust_alloc_zeroed(size: usize, _align: usize) -> *mut u8 {
             bindings::GFP_KERNEL | bindings::__GFP_ZERO,
         ) as *mut u8
     }
-}
-
-#[no_mangle]
-pub fn __rust_alloc_error_handler(_size: usize, _align: usize) -> ! {
-    panic!("Out of memory!");
 }

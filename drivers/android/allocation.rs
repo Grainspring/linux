@@ -1,13 +1,14 @@
 // SPDX-License-Identifier: GPL-2.0
 
-use alloc::sync::Arc;
-use core::mem::{size_of, MaybeUninit};
-use kernel::{bindings, pages::Pages, prelude::*, user_ptr::UserSlicePtrReader, Error};
+use core::mem::{replace, size_of, MaybeUninit};
+use kernel::{bindings, linked_list::List, pages::Pages, prelude::*, user_ptr::UserSlicePtrReader};
 
 use crate::{
+    defs::*,
     node::NodeRef,
     process::{AllocationInfo, Process},
     thread::{BinderError, BinderResult},
+    transaction::FileInfo,
 };
 
 pub(crate) struct Allocation<'a> {
@@ -18,6 +19,7 @@ pub(crate) struct Allocation<'a> {
     pub(crate) process: &'a Process,
     allocation_info: Option<AllocationInfo>,
     free_on_drop: bool,
+    file_list: List<Box<FileInfo>>,
 }
 
 impl<'a> Allocation<'a> {
@@ -36,12 +38,21 @@ impl<'a> Allocation<'a> {
             pages,
             allocation_info: None,
             free_on_drop: true,
+            file_list: List::new(),
         }
     }
 
-    fn iterate<T>(&self, mut offset: usize, mut size: usize, mut cb: T) -> KernelResult
+    pub(crate) fn take_file_list(&mut self) -> List<Box<FileInfo>> {
+        replace(&mut self.file_list, List::new())
+    }
+
+    pub(crate) fn add_file_info(&mut self, file: Box<FileInfo>) {
+        self.file_list.push_back(file);
+    }
+
+    fn iterate<T>(&self, mut offset: usize, mut size: usize, mut cb: T) -> Result
     where
-        T: FnMut(&Pages<0>, usize, usize) -> KernelResult,
+        T: FnMut(&Pages<0>, usize, usize) -> Result,
     {
         // Check that the request is within the buffer.
         if offset.checked_add(size).ok_or(Error::EINVAL)? > self.size {
@@ -65,13 +76,13 @@ impl<'a> Allocation<'a> {
         reader: &mut UserSlicePtrReader,
         offset: usize,
         size: usize,
-    ) -> KernelResult {
+    ) -> Result {
         self.iterate(offset, size, |page, offset, to_copy| {
             page.copy_into_page(reader, offset, to_copy)
         })
     }
 
-    pub(crate) fn read<T>(&self, offset: usize) -> KernelResult<T> {
+    pub(crate) fn read<T>(&self, offset: usize) -> Result<T> {
         let mut out = MaybeUninit::<T>::uninit();
         let mut out_offset = 0;
         self.iterate(offset, size_of::<T>(), |page, offset, to_copy| {
@@ -90,7 +101,7 @@ impl<'a> Allocation<'a> {
         Ok(unsafe { out.assume_init() })
     }
 
-    pub(crate) fn write<T>(&self, offset: usize, obj: &T) -> KernelResult {
+    pub(crate) fn write<T>(&self, offset: usize, obj: &T) -> Result {
         let mut obj_offset = 0;
         self.iterate(offset, size_of::<T>(), |page, offset, to_copy| {
             // SAFETY: The sum of `offset` and `to_copy` is bounded by the size of T.
@@ -111,33 +122,6 @@ impl<'a> Allocation<'a> {
     pub(crate) fn set_info(&mut self, info: AllocationInfo) {
         self.allocation_info = Some(info);
     }
-
-    fn cleanup_object(&self, index_offset: usize, view: &AllocationView) -> KernelResult {
-        let offset = self.read(index_offset)?;
-        let header = view.read::<bindings::binder_object_header>(offset)?;
-        // TODO: Handle other types.
-        match header.type_ {
-            bindings::BINDER_TYPE_WEAK_BINDER | bindings::BINDER_TYPE_BINDER => {
-                let obj = view.read::<bindings::flat_binder_object>(offset)?;
-                let strong = header.type_ == bindings::BINDER_TYPE_BINDER;
-                // SAFETY: The type is `BINDER_TYPE_{WEAK_}BINDER`, so the `binder` field is
-                // populated.
-                let ptr = unsafe { obj.__bindgen_anon_1.binder } as usize;
-                let cookie = obj.cookie as usize;
-                self.process.update_node(ptr, cookie, strong, false);
-                Ok(())
-            }
-            bindings::BINDER_TYPE_WEAK_HANDLE | bindings::BINDER_TYPE_HANDLE => {
-                let obj = view.read::<bindings::flat_binder_object>(offset)?;
-                let strong = header.type_ == bindings::BINDER_TYPE_HANDLE;
-                // SAFETY: The type is `BINDER_TYPE_{WEAK_}HANDLE`, so the `handle` field is
-                // populated.
-                let handle = unsafe { obj.__bindgen_anon_1.handle } as _;
-                self.process.update_ref(handle, false, strong)
-            }
-            _ => Ok(()),
-        }
-    }
 }
 
 impl Drop for Allocation<'_> {
@@ -147,9 +131,10 @@ impl Drop for Allocation<'_> {
         }
 
         if let Some(info) = &self.allocation_info {
-            let view = AllocationView::new(self, info.offsets.start);
-            for i in info.offsets.clone().step_by(size_of::<usize>()) {
-                if self.cleanup_object(i, &view).is_err() {
+            let offsets = info.offsets.clone();
+            let view = AllocationView::new(self, offsets.start);
+            for i in offsets.step_by(size_of::<usize>()) {
+                if view.cleanup_object(i).is_err() {
                     pr_warn!("Error cleaning up object at offset {}\n", i)
                 }
             }
@@ -159,24 +144,24 @@ impl Drop for Allocation<'_> {
     }
 }
 
-pub(crate) struct AllocationView<'a> {
-    alloc: &'a Allocation<'a>,
+pub(crate) struct AllocationView<'a, 'b> {
+    pub(crate) alloc: &'a mut Allocation<'b>,
     limit: usize,
 }
 
-impl<'a> AllocationView<'a> {
-    pub(crate) fn new(alloc: &'a Allocation, limit: usize) -> Self {
+impl<'a, 'b> AllocationView<'a, 'b> {
+    pub(crate) fn new(alloc: &'a mut Allocation<'b>, limit: usize) -> Self {
         AllocationView { alloc, limit }
     }
 
-    pub fn read<T>(&self, offset: usize) -> KernelResult<T> {
+    pub fn read<T>(&self, offset: usize) -> Result<T> {
         if offset.checked_add(size_of::<T>()).ok_or(Error::EINVAL)? > self.limit {
             return Err(Error::EINVAL);
         }
         self.alloc.read(offset)
     }
 
-    pub fn write<T>(&self, offset: usize, obj: &T) -> KernelResult {
+    pub fn write<T>(&self, offset: usize, obj: &T) -> Result {
         if offset.checked_add(size_of::<T>()).ok_or(Error::EINVAL)? > self.limit {
             return Err(Error::EINVAL);
         }
@@ -203,9 +188,9 @@ impl<'a> AllocationView<'a> {
             let newobj = bindings::flat_binder_object {
                 hdr: bindings::binder_object_header {
                     type_: if strong {
-                        bindings::BINDER_TYPE_BINDER
+                        BINDER_TYPE_BINDER
                     } else {
-                        bindings::BINDER_TYPE_WEAK_BINDER
+                        BINDER_TYPE_WEAK_BINDER
                     },
                 },
                 flags: obj.flags,
@@ -228,9 +213,9 @@ impl<'a> AllocationView<'a> {
             let newobj = bindings::flat_binder_object {
                 hdr: bindings::binder_object_header {
                     type_: if strong {
-                        bindings::BINDER_TYPE_HANDLE
+                        BINDER_TYPE_HANDLE
                     } else {
-                        bindings::BINDER_TYPE_WEAK_HANDLE
+                        BINDER_TYPE_WEAK_HANDLE
                     },
                 },
                 flags: obj.flags,
@@ -248,5 +233,32 @@ impl<'a> AllocationView<'a> {
             }
         }
         Ok(())
+    }
+
+    fn cleanup_object(&self, index_offset: usize) -> Result {
+        let offset = self.alloc.read(index_offset)?;
+        let header = self.read::<bindings::binder_object_header>(offset)?;
+        // TODO: Handle other types.
+        match header.type_ {
+            BINDER_TYPE_WEAK_BINDER | BINDER_TYPE_BINDER => {
+                let obj = self.read::<bindings::flat_binder_object>(offset)?;
+                let strong = header.type_ == BINDER_TYPE_BINDER;
+                // SAFETY: The type is `BINDER_TYPE_{WEAK_}BINDER`, so the `binder` field is
+                // populated.
+                let ptr = unsafe { obj.__bindgen_anon_1.binder } as usize;
+                let cookie = obj.cookie as usize;
+                self.alloc.process.update_node(ptr, cookie, strong, false);
+                Ok(())
+            }
+            BINDER_TYPE_WEAK_HANDLE | BINDER_TYPE_HANDLE => {
+                let obj = self.read::<bindings::flat_binder_object>(offset)?;
+                let strong = header.type_ == BINDER_TYPE_HANDLE;
+                // SAFETY: The type is `BINDER_TYPE_{WEAK_}HANDLE`, so the `handle` field is
+                // populated.
+                let handle = unsafe { obj.__bindgen_anon_1.handle } as _;
+                self.alloc.process.update_ref(handle, false, strong)
+            }
+            _ => Ok(()),
+        }
     }
 }

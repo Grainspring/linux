@@ -13,7 +13,7 @@ jobs:
         arch: [arm, arm64, ppc64le, riscv64, x86_64]
         toolchain: [gcc, clang, llvm]
         config: [debug, release]
-        rustc: [2021-02-20]
+        rustc: [2021-06-23]
         output: [src] # [src, build]
         install: [rustup] # [rustup, standalone]
         sysroot: [common] # [common, custom]
@@ -30,14 +30,14 @@ jobs:
 
         # A few independent combinations to avoid exploding the matrix:
         #   - The other option for `output`.
-        #   - Different nightlies for `rustc`.
+        #   - Different releases for `rustc`.
         #   - The other three (`install`, `sysroot`) combinations
         #     (they are interrelated, so the cross-product needs to be tested)
         include:
           - arch: arm64
             toolchain: gcc
             config: debug
-            rustc: 2021-02-20
+            rustc: 2021-06-23
             output: build
             install: rustup
             sysroot: custom
@@ -45,7 +45,7 @@ jobs:
           - arch: ppc64le
             toolchain: clang
             config: release
-            rustc: 2021-02-20
+            rustc: 2021-06-23
             output: build
             install: standalone
             sysroot: common
@@ -53,7 +53,7 @@ jobs:
           - arch: x86_64
             toolchain: llvm
             config: debug
-            rustc: 2021-02-20
+            rustc: 2021-06-23
             output: build
             install: standalone
             sysroot: custom
@@ -61,6 +61,17 @@ jobs:
     steps:
       # Setup: checkout
       - uses: actions/checkout@v2
+
+      # Setup: Store matrix name
+      - run: echo 'MATRIX_NAME=${{ matrix.arch }}-${{ matrix.toolchain }}-${{ matrix.config }}' >> $GITHUB_ENV
+
+      # Setup: Github cache
+      - uses: actions/cache@v2
+        with:
+          path: ~/.ccache
+          key: ${{ env.MATRIX_NAME  }}-ccache-${{ github.run_id }}
+          restore-keys: |
+              ${{ env.MATRIX_NAME  }}-ccache-
 
       # Setup: variables
       - if: matrix.arch == 'x86_64'
@@ -105,7 +116,7 @@ jobs:
           echo 'QEMU_ARGS=-bios /usr/lib/riscv64-linux-gnu/opensbi/generic/fw_jump.elf' >> $GITHUB_ENV
 
       - if: matrix.toolchain == 'clang'
-        run: echo 'MAKE_TOOLCHAIN=CC=clang-11' >> $GITHUB_ENV
+        run: echo 'MAKE_TOOLCHAIN=CC=clang-12' >> $GITHUB_ENV
       - if: matrix.toolchain == 'llvm'
         run: echo 'MAKE_TOOLCHAIN=LLVM=1' >> $GITHUB_ENV
 
@@ -117,7 +128,7 @@ jobs:
       - if: matrix.sysroot == 'custom'
         run: |
           echo 'RUSTC_SYSROOT=--sysroot=$HOME/sysroot' >> $GITHUB_ENV
-          echo "MAKE_SYSROOT=KRUSTCFLAGS=--sysroot=$HOME/sysroot" >> $GITHUB_ENV
+          echo "MAKE_SYSROOT=KRUSTFLAGS=--sysroot=$HOME/sysroot" >> $GITHUB_ENV
 
       # Setup: custom pre-built binaries folder
       - run: |
@@ -126,10 +137,14 @@ jobs:
 
       # Setup: LLVM
       - run: curl https://apt.llvm.org/llvm-snapshot.gpg.key | sudo apt-key add -
-      - run: sudo add-apt-repository 'deb http://apt.llvm.org/focal/ llvm-toolchain-focal-11 main'
+      # Retry to be resilient to intermittent network issues
+      - run: |
+          sudo add-apt-repository 'deb http://apt.llvm.org/focal/ llvm-toolchain-focal-12 main' ||
+            sudo add-apt-repository 'deb http://apt.llvm.org/focal/ llvm-toolchain-focal-12 main' ||
+            sudo add-apt-repository 'deb http://apt.llvm.org/focal/ llvm-toolchain-focal-12 main'
       - run: sudo apt-get update -y
-      - run: sudo apt-get install -y llvm-11 clang-11 lld-11
-      - run: echo $(llvm-config-11 --bindir) >> $GITHUB_PATH
+      - run: sudo apt-get install -y llvm-12 clang-12 lld-12
+      - run: echo $(llvm-config-12 --bindir) >> $GITHUB_PATH
 
       # Setup: GCC
       - if: matrix.arch == 'arm'
@@ -163,12 +178,14 @@ jobs:
       # Setup: rustc
       - if: matrix.install == 'rustup'
         run: |
-          rustup default nightly-${{ matrix.rustc }}
+          rustup default beta-${{ matrix.rustc }}
           rustup component add rustfmt
       - if: matrix.install == 'standalone'
         run: |
-          curl https://static.rust-lang.org/dist/${{ matrix.rustc }}/rust-nightly-x86_64-unknown-linux-gnu.tar.gz | tar xz
-          rust-nightly-x86_64-unknown-linux-gnu/install.sh --without=rust-docs --prefix=$HOME/rustc
+          # FIXME: there is no beta equivalent for https://static.rust-lang.org/dist/channel-rust-x.yy.z.toml,
+          # so just hardcode the URL/date for the moment, since we will moving to a stable release soon anyway.
+          curl https://static.rust-lang.org/dist/${{ matrix.rustc }}/rust-beta-x86_64-unknown-linux-gnu.tar.gz | tar xz
+          rust-beta-x86_64-unknown-linux-gnu/install.sh --without=rust-docs --prefix=$HOME/rustc
           echo $HOME/rustc/bin >> $GITHUB_PATH
 
       # Setup: rustc native libs
@@ -194,6 +211,15 @@ jobs:
       - run: |
           curl -o bin/bindgen https://raw.githubusercontent.com/Rust-for-Linux/ci-bin/master/bindgen-0.56.0/bin/bindgen
           chmod u+x bin/bindgen
+      
+      # Setup: ccache
+      - run: |
+          sudo apt-get install ccache
+          echo '/usr/lib/ccache:$PATH' >> $GITHUB_PATH
+          echo 'CCACHE_COMPRESS=true' >> $GITHUB_ENV
+                
+      # Setup: Check existing ccache
+      - run: ccache -s
 
       # Setup: busybox
       - run: git clone --depth 1 -b 1_30_1 https://github.com/mirror/busybox
@@ -252,9 +278,15 @@ jobs:
             | sed s:$'\r'$:: \
             | tee qemu-stdout.log
 
+      # The kernel should not be generating any warnings
+      - run: |
+          ! grep -v 'at mm/debug_vm_pgtable.c:' qemu-stdout.log | grep '] WARNING:'
+
       # Check
       - run: |
           grep '] rust_minimal: Rust minimal sample (init)$' qemu-stdout.log
+          grep '] rust_minimal: Am I built-in? false$'       qemu-stdout.log
+          grep '] rust_minimal: My message is on the heap!$' qemu-stdout.log
           grep '] rust_minimal: Rust minimal sample (exit)$' qemu-stdout.log
 
       - run: |
@@ -281,36 +313,47 @@ jobs:
           grep '] rust_print: Rust printing macros sample (exit)$'       qemu-stdout.log
 
       - run: |
-          grep '] rust_module_parameters: Rust module parameters sample (init)$'           qemu-stdout.log
+          grep '] rust_module_parameters_builtin_default: Rust module parameters sample (init)'   qemu-stdout.log
+          grep '] rust_module_parameters_builtin_default:   my_bool:    true$'                    qemu-stdout.log
+          grep '] rust_module_parameters_builtin_default:   my_i32:     42$'                      qemu-stdout.log
+          grep '] rust_module_parameters_builtin_default:   my_str:     default str val$'         qemu-stdout.log
+          grep '] rust_module_parameters_builtin_default:   my_usize:   42$'                      qemu-stdout.log
+          grep '] rust_module_parameters_builtin_default:   my_array:   \[0, 1]$'                 qemu-stdout.log
 
-          grep '] rust_module_parameters_builtin_default:   my_bool:    true$'             qemu-stdout.log
-          grep '] rust_module_parameters_builtin_default:   my_i32:     42$'               qemu-stdout.log
-          grep '] rust_module_parameters_builtin_default:   my_str:     default str val$'  qemu-stdout.log
-          grep '] rust_module_parameters_builtin_default:   my_usize:   42$'               qemu-stdout.log
-          grep '] rust_module_parameters_builtin_default:   my_array:   \[0, 1]$'          qemu-stdout.log
+          grep '] rust_module_parameters_builtin_custom: Rust module parameters sample (init)$'   qemu-stdout.log
+          grep '] rust_module_parameters_builtin_custom:   my_bool:    false$'                    qemu-stdout.log
+          grep '] rust_module_parameters_builtin_custom:   my_i32:     345543$'                   qemu-stdout.log
+          grep '] rust_module_parameters_builtin_custom:   my_str:     🦀mod$'                    qemu-stdout.log
+          grep '] rust_module_parameters_builtin_custom:   my_usize:   84$'                       qemu-stdout.log
+          grep '] rust_module_parameters_builtin_custom:   my_array:   \[1, 2, 3]$'               qemu-stdout.log
 
-          grep '] rust_module_parameters_builtin_custom:   my_bool:    false$'             qemu-stdout.log
-          grep '] rust_module_parameters_builtin_custom:   my_i32:     345543$'            qemu-stdout.log
-          grep '] rust_module_parameters_builtin_custom:   my_str:     🦀mod$'             qemu-stdout.log
-          grep '] rust_module_parameters_builtin_custom:   my_usize:   84$'                qemu-stdout.log
-          grep '] rust_module_parameters_builtin_custom:   my_array:   \[1, 2, 3]$'        qemu-stdout.log
+          grep '] rust_module_parameters_loadable_default: Rust module parameters sample (init)$' qemu-stdout.log
+          grep '] rust_module_parameters_loadable_default:   my_bool:    true$'                   qemu-stdout.log
+          grep '] rust_module_parameters_loadable_default:   my_i32:     42$'                     qemu-stdout.log
+          grep '] rust_module_parameters_loadable_default:   my_str:     default str val$'        qemu-stdout.log
+          grep '] rust_module_parameters_loadable_default:   my_usize:   42$'                     qemu-stdout.log
+          grep '] rust_module_parameters_loadable_default:   my_array:   \[0, 1]$'                qemu-stdout.log
+          grep '] rust_module_parameters_loadable_default: Rust module parameters sample (exit)$' qemu-stdout.log
 
-          grep '] rust_module_parameters_loadable_default:   my_bool:    true$'            qemu-stdout.log
-          grep '] rust_module_parameters_loadable_default:   my_i32:     42$'              qemu-stdout.log
-          grep '] rust_module_parameters_loadable_default:   my_str:     default str val$' qemu-stdout.log
-          grep '] rust_module_parameters_loadable_default:   my_usize:   42$'              qemu-stdout.log
-          grep '] rust_module_parameters_loadable_default:   my_array:   \[0, 1]$'         qemu-stdout.log
+          grep '] rust_module_parameters_loadable_custom: Rust module parameters sample (init)$'  qemu-stdout.log
+          grep '] rust_module_parameters_loadable_custom:   my_bool:    false$'                   qemu-stdout.log
+          grep '] rust_module_parameters_loadable_custom:   my_i32:     345543$'                  qemu-stdout.log
+          grep '] rust_module_parameters_loadable_custom:   my_str:     🦀mod$'                   qemu-stdout.log
+          grep '] rust_module_parameters_loadable_custom:   my_usize:   84$'                      qemu-stdout.log
+          grep '] rust_module_parameters_loadable_custom:   my_array:   \[1, 2, 3]$'              qemu-stdout.log
+          grep '] rust_module_parameters_loadable_custom: Rust module parameters sample (exit)$'  qemu-stdout.log
 
-          grep '] rust_module_parameters_loadable_custom:   my_bool:    false$'            qemu-stdout.log
-          grep '] rust_module_parameters_loadable_custom:   my_i32:     345543$'           qemu-stdout.log
-          grep '] rust_module_parameters_loadable_custom:   my_str:     🦀mod$'            qemu-stdout.log
-          grep '] rust_module_parameters_loadable_custom:   my_usize:   84$'               qemu-stdout.log
-          grep '] rust_module_parameters_loadable_custom:   my_array:   \[1, 2, 3]$'       qemu-stdout.log
-
-          grep '] rust_module_parameters: Rust module parameters sample (exit)$'           qemu-stdout.log
+          grep '] rust_module_parameters: Rust module parameters sample (init)$'                  qemu-stdout.log
+          grep '] rust_module_parameters:   my_bool:    true$'                                    qemu-stdout.log
+          grep '] rust_module_parameters:   my_i32:     42$'                                      qemu-stdout.log
+          grep '] rust_module_parameters:   my_str:     default str val$'                         qemu-stdout.log
+          grep '] rust_module_parameters:   my_usize:   42$'                                      qemu-stdout.log
+          grep '] rust_module_parameters:   my_array:   \[0, 1]$'                                 qemu-stdout.log
+          grep '] rust_module_parameters: Rust module parameters sample (exit)$'                  qemu-stdout.log
 
       - run: |
           grep '] rust_sync: Rust synchronisation primitives sample (init)$' qemu-stdout.log
+          grep '] rust_sync: Value: 10$'                                     qemu-stdout.log
           grep '] rust_sync: Rust synchronisation primitives sample (exit)$' qemu-stdout.log
 
       - run: |
@@ -323,6 +366,7 @@ jobs:
 
       - run: |
           grep '] rust_stack_probing: Rust stack probing sample (init)$' qemu-stdout.log
+          grep '] rust_stack_probing: Large array has length: 514$'      qemu-stdout.log
           grep '] rust_stack_probing: Rust stack probing sample (exit)$' qemu-stdout.log
 
       - run: |
@@ -356,5 +400,11 @@ jobs:
       # Docs
       - run: make ${{ env.MAKE_ARCH }} ${{ env.MAKE_CROSS_COMPILE }} ${{ env.MAKE_TOOLCHAIN }} ${{ env.MAKE_OUTPUT }} ${{ env.MAKE_SYSROOT }} -j3 rustdoc
 
+      # Tests
+      - run: make ${{ env.MAKE_ARCH }} ${{ env.MAKE_CROSS_COMPILE }} ${{ env.MAKE_TOOLCHAIN }} ${{ env.MAKE_OUTPUT }} ${{ env.MAKE_SYSROOT }} -j3 rusttest
+
       # Formatting
-      - run: make rustfmtcheck
+      - run: make ${{ env.MAKE_ARCH }} ${{ env.MAKE_CROSS_COMPILE }} ${{ env.MAKE_TOOLCHAIN }} ${{ env.MAKE_OUTPUT }} ${{ env.MAKE_SYSROOT }} -j3 rustfmtcheck
+
+      # View changes to ccache
+      - run: ccache -s

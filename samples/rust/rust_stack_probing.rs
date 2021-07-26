@@ -4,7 +4,7 @@
 
 #![no_std]
 #![feature(allocator_api, global_asm)]
-#![feature(test)]
+#![feature(bench_black_box)]
 
 use kernel::prelude::*;
 
@@ -19,7 +19,7 @@ module! {
 struct RustStackProbing;
 
 impl KernelModule for RustStackProbing {
-    fn init() -> KernelResult<Self> {
+    fn init() -> Result<Self> {
         pr_info!("Rust stack probing sample (init)\n");
 
         // Including this large variable on the stack will trigger

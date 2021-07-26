@@ -1,10 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0
 
-use alloc::{collections::btree_map::BTreeMap, sync::Arc, vec::Vec};
 use core::{
-    mem::{swap, MaybeUninit},
+    mem::{take, MaybeUninit},
     ops::Range,
-    pin::Pin,
 };
 use kernel::{
     bindings, c_types,
@@ -14,9 +12,10 @@ use kernel::{
     linked_list::List,
     pages::Pages,
     prelude::*,
-    sync::{Guard, Mutex, Ref, RefCount, RefCounted},
+    rbtree::RBTree,
+    sync::{Guard, Mutex, Ref},
+    task::Task,
     user_ptr::{UserSlicePtr, UserSlicePtrReader},
-    Error,
 };
 
 use crate::{
@@ -32,10 +31,6 @@ use crate::{
 // TODO: Review this:
 // Lock order: Process::node_refs -> Process::inner -> Thread::inner
 
-extern "C" {
-    fn rust_helper_current_pid() -> c_types::c_int;
-}
-
 pub(crate) struct AllocationInfo {
     /// Range within the allocation where we can find the offsets to the object descriptors.
     pub(crate) offsets: Range<usize>,
@@ -48,7 +43,7 @@ struct Mapping {
 }
 
 impl Mapping {
-    fn new(address: usize, size: usize, pages: Arc<[Pages<0>]>) -> KernelResult<Self> {
+    fn new(address: usize, size: usize, pages: Arc<[Pages<0>]>) -> Result<Self> {
         let alloc = RangeAllocator::new(size)?;
         Ok(Self {
             address,
@@ -62,11 +57,11 @@ impl Mapping {
 pub(crate) struct ProcessInner {
     is_manager: bool,
     is_dead: bool,
-    threads: BTreeMap<i32, Arc<Thread>>,
+    threads: RBTree<i32, Arc<Thread>>,
     ready_threads: List<Arc<Thread>>,
     work: List<DeliverToReadListAdapter>,
     mapping: Option<Mapping>,
-    nodes: BTreeMap<usize, Arc<Node>>,
+    nodes: RBTree<usize, Arc<Node>>,
 
     delivered_deaths: List<Arc<NodeDeath>>,
 
@@ -85,11 +80,11 @@ impl ProcessInner {
         Self {
             is_manager: false,
             is_dead: false,
-            threads: BTreeMap::new(),
+            threads: RBTree::new(),
             ready_threads: List::new(),
             work: List::new(),
             mapping: None,
-            nodes: BTreeMap::new(),
+            nodes: RBTree::new(),
             requested_thread_count: 0,
             max_threads: 0,
             started_thread_count: 0,
@@ -162,7 +157,7 @@ impl ProcessInner {
     /// Returns an existing node with the given pointer and cookie, if one exists.
     ///
     /// Returns an error if a node with the given pointer but a different cookie exists.
-    fn get_existing_node(&self, ptr: usize, cookie: usize) -> KernelResult<Option<Arc<Node>>> {
+    fn get_existing_node(&self, ptr: usize, cookie: usize) -> Result<Option<Arc<Node>>> {
         match self.nodes.get(&ptr) {
             None => Ok(None),
             Some(node) => {
@@ -185,11 +180,10 @@ impl ProcessInner {
         cookie: usize,
         strong: bool,
         thread: Option<&Thread>,
-    ) -> KernelResult<Option<NodeRef>> {
-        Ok(match self.get_existing_node(ptr, cookie)? {
-            None => None,
-            Some(node) => Some(self.new_node_ref(node, strong, thread)),
-        })
+    ) -> Result<Option<NodeRef>> {
+        Ok(self
+            .get_existing_node(ptr, cookie)?
+            .map(|node| self.new_node_ref(node, strong, thread)))
     }
 
     fn register_thread(&mut self) -> bool {
@@ -225,7 +219,7 @@ struct ArcReservation<T> {
 }
 
 impl<T> ArcReservation<T> {
-    fn new() -> KernelResult<Self> {
+    fn new() -> Result<Self> {
         Ok(Self {
             mem: Arc::try_new(MaybeUninit::<T>::uninit())?,
         })
@@ -261,26 +255,28 @@ impl NodeRefInfo {
 }
 
 struct ProcessNodeRefs {
-    by_handle: BTreeMap<u32, NodeRefInfo>,
-    by_global_id: BTreeMap<u64, u32>,
+    by_handle: RBTree<u32, NodeRefInfo>,
+    by_global_id: RBTree<u64, u32>,
 }
 
 impl ProcessNodeRefs {
     fn new() -> Self {
         Self {
-            by_handle: BTreeMap::new(),
-            by_global_id: BTreeMap::new(),
+            by_handle: RBTree::new(),
+            by_global_id: RBTree::new(),
         }
     }
 }
 
 pub(crate) struct Process {
-    ctx: Arc<Context>,
-    ref_count: RefCount,
+    ctx: Ref<Context>,
 
-    // TODO: For now this a mutex because we have allocations in BTreeMap and RangeAllocator while
-    // holding the lock. We may want to split up the process state at some point to use a spin lock
-    // for the other fields; we can also get rid of allocations in BTreeMap once we replace it.
+    // The task leader (process).
+    pub(crate) task: Task,
+
+    // TODO: For now this a mutex because we have allocations in RangeAllocator while holding the
+    // lock. We may want to split up the process state at some point to use a spin lock for the
+    // other fields.
     // TODO: Make this private again.
     pub(crate) inner: Mutex<ProcessInner>,
 
@@ -293,23 +289,25 @@ unsafe impl Send for Process {}
 unsafe impl Sync for Process {}
 
 impl Process {
-    fn new(ctx: Arc<Context>) -> KernelResult<Ref<Self>> {
-        let mut proc_ref = Ref::try_new(Self {
-            ref_count: RefCount::new(),
-            ctx,
-            // SAFETY: `inner` is initialised in the call to `mutex_init` below.
-            inner: unsafe { Mutex::new(ProcessInner::new()) },
-            // SAFETY: `node_refs` is initialised in the call to `mutex_init` below.
-            node_refs: unsafe { Mutex::new(ProcessNodeRefs::new()) },
-        })?;
-        let process = Ref::get_mut(&mut proc_ref).ok_or(Error::EINVAL)?;
-        // SAFETY: `inner` is pinned behind the `Arc` reference.
-        let pinned = unsafe { Pin::new_unchecked(&process.inner) };
-        kernel::mutex_init!(pinned, "Process::inner");
-        // SAFETY: `node_refs` is pinned behind the `Arc` reference.
-        let pinned = unsafe { Pin::new_unchecked(&process.node_refs) };
-        kernel::mutex_init!(pinned, "Process::node_refs");
-        Ok(proc_ref)
+    fn new(ctx: Ref<Context>) -> Result<Pin<Ref<Self>>> {
+        Ok(Ref::pinned(Ref::try_new_and_init(
+            Self {
+                ctx,
+                task: Task::current().group_leader().clone(),
+                // SAFETY: `inner` is initialised in the call to `mutex_init` below.
+                inner: unsafe { Mutex::new(ProcessInner::new()) },
+                // SAFETY: `node_refs` is initialised in the call to `mutex_init` below.
+                node_refs: unsafe { Mutex::new(ProcessNodeRefs::new()) },
+            },
+            |mut process| {
+                // SAFETY: `inner` is pinned when `Process` is.
+                let pinned = unsafe { process.as_mut().map_unchecked_mut(|p| &mut p.inner) };
+                kernel::mutex_init!(pinned, "Process::inner");
+                // SAFETY: `node_refs` is pinned when `Process` is.
+                let pinned = unsafe { process.as_mut().map_unchecked_mut(|p| &mut p.node_refs) };
+                kernel::mutex_init!(pinned, "Process::node_refs");
+            },
+        )?))
     }
 
     /// Attemps to fetch a work item from the process queue.
@@ -338,7 +336,7 @@ impl Process {
         Either::Right(Registration::new(self, thread, &mut inner))
     }
 
-    fn get_thread(&self, id: i32) -> KernelResult<Arc<Thread>> {
+    fn get_thread(self: &Ref<Self>, id: i32) -> Result<Arc<Thread>> {
         // TODO: Consider using read/write locks here instead.
         {
             let inner = self.inner.lock();
@@ -348,7 +346,8 @@ impl Process {
         }
 
         // Allocate a new `Thread` without holding any locks.
-        let ta = Thread::new(id, Ref::new_from(self))?;
+        let ta = Thread::new(id, self.clone())?;
+        let node = RBTree::try_allocate_node(id, ta.clone())?;
 
         let mut inner = self.inner.lock();
 
@@ -357,9 +356,7 @@ impl Process {
             return Ok(thread.clone());
         }
 
-        // TODO: We need a better solution here. Since this allocates, we cannot do it while
-        // holding a spinlock because it could block. It could panic too.
-        inner.threads.insert(id, ta.clone());
+        inner.threads.insert(node);
         Ok(ta)
     }
 
@@ -367,13 +364,19 @@ impl Process {
         self.inner.lock().push_work(work)
     }
 
-    fn set_as_manager(&self, info: Option<FlatBinderObject>, thread: &Thread) -> KernelResult {
-        let (ptr, cookie) = if let Some(obj) = info {
-            (unsafe { obj.__bindgen_anon_1.binder }, obj.cookie)
+    fn set_as_manager(self: &Ref<Self>, info: Option<FlatBinderObject>, thread: &Thread) -> Result {
+        let (ptr, cookie, flags) = if let Some(obj) = info {
+            (
+                // SAFETY: The object type for this ioctl is implicitly `BINDER_TYPE_BINDER`, so it
+                // is safe to access the `binder` field.
+                unsafe { obj.__bindgen_anon_1.binder },
+                obj.cookie,
+                obj.flags,
+            )
         } else {
-            (0, 0)
+            (0, 0, 0)
         };
-        let node_ref = self.get_node(ptr as _, cookie as _, true, Some(thread))?;
+        let node_ref = self.get_node(ptr as _, cookie as _, flags as _, true, Some(thread))?;
         let node = node_ref.node.clone();
         self.ctx.set_manager_node(node_ref)?;
         self.inner.lock().is_manager = true;
@@ -385,12 +388,13 @@ impl Process {
     }
 
     pub(crate) fn get_node(
-        &self,
+        self: &Ref<Self>,
         ptr: usize,
         cookie: usize,
+        flags: u32,
         strong: bool,
         thread: Option<&Thread>,
-    ) -> KernelResult<NodeRef> {
+    ) -> Result<NodeRef> {
         // Try to find an existing node.
         {
             let mut inner = self.inner.lock();
@@ -400,15 +404,15 @@ impl Process {
         }
 
         // Allocate the node before reacquiring the lock.
-        let node = Arc::try_new(Node::new(ptr, cookie, Ref::new_from(self)))?;
+        let node = Arc::try_new(Node::new(ptr, cookie, flags, self.clone()))?;
+        let rbnode = RBTree::try_allocate_node(ptr, node.clone())?;
 
         let mut inner = self.inner.lock();
         if let Some(node) = inner.get_existing_node_ref(ptr, cookie, strong, thread)? {
             return Ok(node);
         }
 
-        // TODO: Avoid allocation while holding lock.
-        inner.nodes.insert(ptr, node.clone());
+        inner.nodes.insert(rbnode);
         Ok(inner.new_node_ref(node, strong, thread))
     }
 
@@ -416,10 +420,26 @@ impl Process {
         &self,
         node_ref: NodeRef,
         is_mananger: bool,
-    ) -> KernelResult<u32> {
+    ) -> Result<u32> {
+        {
+            let mut refs = self.node_refs.lock();
+
+            // Do a lookup before inserting.
+            if let Some(handle_ref) = refs.by_global_id.get(&node_ref.node.global_id) {
+                let handle = *handle_ref;
+                let info = refs.by_handle.get_mut(&handle).unwrap();
+                info.node_ref.absorb(node_ref);
+                return Ok(handle);
+            }
+        }
+
+        // Reserve memory for tree nodes.
+        let reserve1 = RBTree::try_reserve_node()?;
+        let reserve2 = RBTree::try_reserve_node()?;
+
         let mut refs = self.node_refs.lock();
 
-        // Do a lookup before inserting.
+        // Do a lookup again as node may have been inserted before the lock was reacquired.
         if let Some(handle_ref) = refs.by_global_id.get(&node_ref.node.global_id) {
             let handle = *handle_ref;
             let info = refs.by_handle.get_mut(&handle).unwrap();
@@ -443,9 +463,10 @@ impl Process {
         if inner.is_dead {
             return Err(Error::ESRCH);
         }
-        // TODO: Two allocations below.
-        refs.by_global_id.insert(node_ref.node.global_id, target);
-        refs.by_handle.insert(target, NodeRefInfo::new(node_ref));
+        refs.by_global_id
+            .insert(reserve1.into_node(node_ref.node.global_id, target));
+        refs.by_handle
+            .insert(reserve2.into_node(target, NodeRefInfo::new(node_ref)));
         Ok(target)
     }
 
@@ -475,7 +496,7 @@ impl Process {
         drop(removed);
     }
 
-    pub(crate) fn update_ref(&self, handle: u32, inc: bool, strong: bool) -> KernelResult {
+    pub(crate) fn update_ref(&self, handle: u32, inc: bool, strong: bool) -> Result {
         if inc && handle == 0 {
             if let Ok(node_ref) = self.ctx.get_manager_node(strong) {
                 if core::ptr::eq(self, &*node_ref.node.owner) {
@@ -514,18 +535,14 @@ impl Process {
         }
     }
 
-    pub(crate) fn inc_ref_done(
-        &self,
-        reader: &mut UserSlicePtrReader,
-        strong: bool,
-    ) -> KernelResult {
+    pub(crate) fn inc_ref_done(&self, reader: &mut UserSlicePtrReader, strong: bool) -> Result {
         let ptr = reader.read::<usize>()?;
         let cookie = reader.read::<usize>()?;
         self.update_node(ptr, cookie, strong, true);
         Ok(())
     }
 
-    pub(crate) fn buffer_alloc(&self, size: usize) -> BinderResult<Allocation> {
+    pub(crate) fn buffer_alloc(&self, size: usize) -> BinderResult<Allocation<'_>> {
         let mut inner = self.inner.lock();
         let mapping = inner.mapping.as_mut().ok_or_else(BinderError::new_dead)?;
 
@@ -539,11 +556,11 @@ impl Process {
         ))
     }
 
-    // TODO: Review if we want an Option or a KernelResult.
-    pub(crate) fn buffer_get(&self, ptr: usize) -> Option<Allocation> {
+    // TODO: Review if we want an Option or a Result.
+    pub(crate) fn buffer_get(&self, ptr: usize) -> Option<Allocation<'_>> {
         let mut inner = self.inner.lock();
         let mapping = inner.mapping.as_mut()?;
-        let offset = ptr - mapping.address;
+        let offset = ptr.checked_sub(mapping.address)?;
         let (size, odata) = mapping.alloc.reserve_existing(offset).ok()?;
         let mut alloc = Allocation::new(self, offset, size, ptr, mapping.pages.clone());
         if let Some(data) = odata {
@@ -555,12 +572,17 @@ impl Process {
     pub(crate) fn buffer_raw_free(&self, ptr: usize) {
         let mut inner = self.inner.lock();
         if let Some(ref mut mapping) = &mut inner.mapping {
-            if mapping
-                .alloc
-                .reservation_abort(ptr - mapping.address)
-                .is_err()
+            if ptr < mapping.address
+                || mapping
+                    .alloc
+                    .reservation_abort(ptr - mapping.address)
+                    .is_err()
             {
-                pr_warn!("Offset {} failed to free\n", ptr - mapping.address);
+                pr_warn!(
+                    "Pointer {:x} failed to free, base = {:x}\n",
+                    ptr,
+                    mapping.address
+                );
             }
         }
     }
@@ -574,7 +596,7 @@ impl Process {
         }
     }
 
-    fn create_mapping(&self, vma: &mut bindings::vm_area_struct) -> KernelResult {
+    fn create_mapping(&self, vma: &mut bindings::vm_area_struct) -> Result {
         let size = core::cmp::min(
             (vma.vm_end - vma.vm_start) as usize,
             bindings::SZ_4M as usize,
@@ -590,12 +612,11 @@ impl Process {
         for _ in 0..page_count {
             let page = Pages::<0>::new()?;
             page.insert_page(vma, address)?;
-            pages.push(page);
+            pages.try_push(page)?;
             address += 1 << bindings::PAGE_SHIFT;
         }
 
-        // TODO: This allocates memory.
-        let arc = Arc::from(pages);
+        let arc = Arc::try_from_vec(pages)?;
 
         // Save pages for later.
         let mut inner = self.inner.lock();
@@ -606,7 +627,7 @@ impl Process {
         Ok(())
     }
 
-    fn version(&self, data: UserSlicePtr) -> KernelResult {
+    fn version(&self, data: UserSlicePtr) -> Result {
         data.writer().write(&BinderVersion::current())
     }
 
@@ -623,7 +644,7 @@ impl Process {
         self.inner.lock().max_threads = max;
     }
 
-    fn get_node_debug_info(&self, data: UserSlicePtr) -> KernelResult {
+    fn get_node_debug_info(&self, data: UserSlicePtr) -> Result {
         let (mut reader, mut writer) = data.reader_writer();
 
         // Read the starting point.
@@ -643,7 +664,7 @@ impl Process {
         writer.write(&out)
     }
 
-    fn get_node_info_from_ref(&self, data: UserSlicePtr) -> KernelResult {
+    fn get_node_info_from_ref(&self, data: UserSlicePtr) -> Result {
         let (mut reader, mut writer) = data.reader_writer();
         let mut out = reader.read::<BinderNodeInfoForRef>()?;
 
@@ -687,10 +708,10 @@ impl Process {
     }
 
     pub(crate) fn request_death(
-        &self,
+        self: &Ref<Self>,
         reader: &mut UserSlicePtrReader,
         thread: &Thread,
-    ) -> KernelResult {
+    ) -> Result {
         let handle: u32 = reader.read()?;
         let cookie: usize = reader.read()?;
 
@@ -713,11 +734,15 @@ impl Process {
         }
 
         // SAFETY: `init` is called below.
-        let death = death.commit(unsafe {
-            NodeDeath::new(info.node_ref.node.clone(), Ref::new_from(self), cookie)
-        });
-        // SAFETY: `death` is pinned behind the `Arc` reference.
-        unsafe { Pin::new_unchecked(death.as_ref()) }.init();
+        let mut death = death
+            .commit(unsafe { NodeDeath::new(info.node_ref.node.clone(), self.clone(), cookie) });
+
+        {
+            let mutable = Arc::get_mut(&mut death).ok_or(Error::EINVAL)?;
+            // SAFETY: `mutable` is pinned behind the `Arc` reference.
+            unsafe { Pin::new_unchecked(mutable) }.init();
+        }
+
         info.death = Some(death.clone());
 
         // Register the death notification.
@@ -733,11 +758,7 @@ impl Process {
         Ok(())
     }
 
-    pub(crate) fn clear_death(
-        &self,
-        reader: &mut UserSlicePtrReader,
-        thread: &Thread,
-    ) -> KernelResult {
+    pub(crate) fn clear_death(&self, reader: &mut UserSlicePtrReader, thread: &Thread) -> Result {
         let handle: u32 = reader.read()?;
         let cookie: usize = reader.read()?;
 
@@ -767,44 +788,43 @@ impl Process {
 }
 
 impl IoctlHandler for Process {
-    fn write(&self, _file: &File, cmd: u32, reader: &mut UserSlicePtrReader) -> KernelResult<i32> {
-        let thread = self.get_thread(unsafe { rust_helper_current_pid() })?;
+    type Target = Ref<Process>;
+
+    fn write(
+        this: &Ref<Process>,
+        _file: &File,
+        cmd: u32,
+        reader: &mut UserSlicePtrReader,
+    ) -> Result<i32> {
+        let thread = this.get_thread(Task::current().pid())?;
         match cmd {
-            bindings::BINDER_SET_MAX_THREADS => self.set_max_threads(reader.read()?),
-            bindings::BINDER_SET_CONTEXT_MGR => self.set_as_manager(None, &thread)?,
-            bindings::BINDER_THREAD_EXIT => self.remove_thread(thread),
+            bindings::BINDER_SET_MAX_THREADS => this.set_max_threads(reader.read()?),
+            bindings::BINDER_SET_CONTEXT_MGR => this.set_as_manager(None, &thread)?,
+            bindings::BINDER_THREAD_EXIT => this.remove_thread(thread),
             bindings::BINDER_SET_CONTEXT_MGR_EXT => {
-                self.set_as_manager(Some(reader.read()?), &thread)?
+                this.set_as_manager(Some(reader.read()?), &thread)?
             }
             _ => return Err(Error::EINVAL),
         }
         Ok(0)
     }
 
-    fn read_write(&self, file: &File, cmd: u32, data: UserSlicePtr) -> KernelResult<i32> {
-        let thread = self.get_thread(unsafe { rust_helper_current_pid() })?;
+    fn read_write(this: &Ref<Process>, file: &File, cmd: u32, data: UserSlicePtr) -> Result<i32> {
+        let thread = this.get_thread(Task::current().pid())?;
         match cmd {
             bindings::BINDER_WRITE_READ => thread.write_read(data, file.is_blocking())?,
-            bindings::BINDER_GET_NODE_DEBUG_INFO => self.get_node_debug_info(data)?,
-            bindings::BINDER_GET_NODE_INFO_FOR_REF => self.get_node_info_from_ref(data)?,
-            bindings::BINDER_VERSION => self.version(data)?,
+            bindings::BINDER_GET_NODE_DEBUG_INFO => this.get_node_debug_info(data)?,
+            bindings::BINDER_GET_NODE_INFO_FOR_REF => this.get_node_info_from_ref(data)?,
+            bindings::BINDER_VERSION => this.version(data)?,
             _ => return Err(Error::EINVAL),
         }
         Ok(0)
     }
 }
 
-unsafe impl RefCounted for Process {
-    fn get_count(&self) -> &RefCount {
-        &self.ref_count
-    }
-}
-
-impl FileOpener<Arc<Context>> for Process {
-    fn open(ctx: &Arc<Context>) -> KernelResult<Self::Wrapper> {
-        let process = Self::new(ctx.clone())?;
-        // SAFETY: Pointer is pinned behind `Ref`.
-        Ok(unsafe { Pin::new_unchecked(process) })
+impl FileOpener<Ref<Context>> for Process {
+    fn open(ctx: &Ref<Context>) -> Result<Self::Wrapper> {
+        Self::new(ctx.clone())
     }
 }
 
@@ -847,8 +867,7 @@ impl FileOperations for Process {
         // Drop all references. We do this dance with `swap` to avoid destroying the references
         // while holding the lock.
         let mut refs = obj.node_refs.lock();
-        let mut node_refs = BTreeMap::new();
-        swap(&mut refs.by_handle, &mut node_refs);
+        let mut node_refs = take(&mut refs.by_handle);
         drop(refs);
 
         // Remove all death notifications from the nodes (that belong to a different process).
@@ -864,10 +883,8 @@ impl FileOperations for Process {
 
         // Do similar dance for the state lock.
         let mut inner = obj.inner.lock();
-        let mut threads = BTreeMap::new();
-        let mut nodes = BTreeMap::new();
-        swap(&mut inner.threads, &mut threads);
-        swap(&mut inner.nodes, &mut nodes);
+        let threads = take(&mut inner.threads);
+        let nodes = take(&mut inner.nodes);
         drop(inner);
 
         // Release all threads.
@@ -892,16 +909,19 @@ impl FileOperations for Process {
         }
     }
 
-    fn ioctl(&self, file: &File, cmd: &mut IoctlCommand) -> KernelResult<i32> {
-        cmd.dispatch(self, file)
+    fn ioctl(this: &Ref<Process>, file: &File, cmd: &mut IoctlCommand) -> Result<i32> {
+        cmd.dispatch::<Self>(this, file)
     }
 
-    fn compat_ioctl(&self, file: &File, cmd: &mut IoctlCommand) -> KernelResult<i32> {
-        cmd.dispatch(self, file)
+    fn compat_ioctl(this: &Ref<Process>, file: &File, cmd: &mut IoctlCommand) -> Result<i32> {
+        cmd.dispatch::<Self>(this, file)
     }
 
-    fn mmap(&self, _file: &File, vma: &mut bindings::vm_area_struct) -> KernelResult {
-        // TODO: Only group leader is allowed to create mappings.
+    fn mmap(this: &Ref<Process>, _file: &File, vma: &mut bindings::vm_area_struct) -> Result {
+        // We don't allow mmap to be used in a different process.
+        if !Task::current().group_leader().eq(&this.task) {
+            return Err(Error::EINVAL);
+        }
 
         if vma.vm_start == 0 {
             return Err(Error::EINVAL);
@@ -915,13 +935,13 @@ impl FileOperations for Process {
         vma.vm_flags &= !(bindings::VM_MAYWRITE as c_types::c_ulong);
 
         // TODO: Set ops. We need to learn when the user unmaps so that we can stop using it.
-        self.create_mapping(vma)
+        this.create_mapping(vma)
     }
 
-    fn poll(&self, file: &File, table: &PollTable) -> KernelResult<u32> {
-        let thread = self.get_thread(unsafe { rust_helper_current_pid() })?;
+    fn poll(this: &Ref<Process>, file: &File, table: &PollTable) -> Result<u32> {
+        let thread = this.get_thread(Task::current().pid())?;
         let (from_proc, mut mask) = thread.poll(file, table);
-        if mask == 0 && from_proc && !self.inner.lock().work.is_empty() {
+        if mask == 0 && from_proc && !this.inner.lock().work.is_empty() {
             mask |= bindings::POLLIN;
         }
         Ok(mask)
@@ -937,7 +957,7 @@ impl<'a> Registration<'a> {
     fn new(
         process: &'a Process,
         thread: &'a Arc<Thread>,
-        guard: &mut Guard<Mutex<ProcessInner>>,
+        guard: &mut Guard<'_, Mutex<ProcessInner>>,
     ) -> Self {
         guard.ready_threads.push_back(thread.clone());
         Self { process, thread }

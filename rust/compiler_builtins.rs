@@ -8,12 +8,10 @@
 //!
 //! At the moment, some builtins are required that should not be. For instance,
 //! [`core`] has floating-point functionality which we should not be compiling
-//! in. For the moment, we define them to [`panic!`] at runtime for simplicity.
-//! These are actually a superset of the ones we actually need to define,
-//! but it seems simpler to ban entire categories at once. In the future,
-//! we might be able to remove all this by providing our own custom [`core`]
-//! etc., or perhaps [`core`] itself might provide `cfg` options to disable
-//! enough functionality to avoid requiring some of these.
+//! in. We will work with upstream [`core`] to provide feature flags to disable
+//! the parts we do not need. For the moment, we define them to [`panic!`] at
+//! runtime for simplicity to catch mistakes, instead of performing surgery
+//! on `core.o`.
 //!
 //! In any case, all these symbols are weakened to ensure we do not override
 //! those that may be provided by the rest of the kernel.
@@ -25,10 +23,6 @@
 #![compiler_builtins]
 #![no_builtins]
 #![no_std]
-#![deny(clippy::complexity)]
-#![deny(clippy::correctness)]
-#![deny(clippy::perf)]
-#![deny(clippy::style)]
 
 macro_rules! define_panicking_intrinsics(
     ($reason: tt, { $($ident: ident, )* }) => {
@@ -41,10 +35,6 @@ macro_rules! define_panicking_intrinsics(
         )*
     }
 );
-
-define_panicking_intrinsics!("non-inline stack probes should not be used", {
-    __rust_probestack,
-});
 
 define_panicking_intrinsics!("`f32` should not be used", {
     __addsf3,
@@ -149,7 +139,7 @@ extern "C" {
 }
 
 #[panic_handler]
-fn panic(_info: &core::panic::PanicInfo) -> ! {
+fn panic(_info: &core::panic::PanicInfo<'_>) -> ! {
     unsafe {
         rust_helper_BUG();
     }

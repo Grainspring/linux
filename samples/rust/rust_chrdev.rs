@@ -5,10 +5,8 @@
 #![no_std]
 #![feature(allocator_api, global_asm)]
 
-use alloc::boxed::Box;
-use core::pin::Pin;
 use kernel::prelude::*;
-use kernel::{chrdev, cstr, file_operations::FileOperations};
+use kernel::{c_str, chrdev, file_operations::FileOperations};
 
 module! {
     type: RustChrdev,
@@ -30,11 +28,11 @@ struct RustChrdev {
 }
 
 impl KernelModule for RustChrdev {
-    fn init() -> KernelResult<Self> {
+    fn init() -> Result<Self> {
         pr_info!("Rust character device sample (init)\n");
 
         let mut chrdev_reg =
-            chrdev::Registration::new_pinned(cstr!("rust_chrdev"), 0, &THIS_MODULE)?;
+            chrdev::Registration::new_pinned(c_str!("rust_chrdev"), 0, &THIS_MODULE)?;
 
         // Register the same kind of device twice, we're just demonstrating
         // that you can use multiple minors. There are two minors in this case

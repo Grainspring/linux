@@ -20,12 +20,12 @@ struct RustMinimal {
 }
 
 impl KernelModule for RustMinimal {
-    fn init() -> KernelResult<Self> {
+    fn init() -> Result<Self> {
         pr_info!("Rust minimal sample (init)\n");
         pr_info!("Am I built-in? {}\n", !cfg!(MODULE));
 
         Ok(RustMinimal {
-            message: "on the heap!".to_owned(),
+            message: "on the heap!".try_to_owned()?,
         })
     }
 }
