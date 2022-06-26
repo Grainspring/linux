@@ -106,6 +106,7 @@ static const struct usb_device_id id_table[] = {
 	{ USB_DEVICE(HP_VENDOR_ID, HP_LCM220_PRODUCT_ID) },
 	{ USB_DEVICE(HP_VENDOR_ID, HP_LCM960_PRODUCT_ID) },
 	{ USB_DEVICE(HP_VENDOR_ID, HP_LM920_PRODUCT_ID) },
+	{ USB_DEVICE(HP_VENDOR_ID, HP_LM930_PRODUCT_ID) },
 	{ USB_DEVICE(HP_VENDOR_ID, HP_LM940_PRODUCT_ID) },
 	{ USB_DEVICE(HP_VENDOR_ID, HP_TD620_PRODUCT_ID) },
 	{ USB_DEVICE(CRESSI_VENDOR_ID, CRESSI_EDY_PRODUCT_ID) },
@@ -116,6 +117,7 @@ static const struct usb_device_id id_table[] = {
 	{ USB_DEVICE(ADLINK_VENDOR_ID, ADLINK_ND6530GC_PRODUCT_ID) },
 	{ USB_DEVICE(SMART_VENDOR_ID, SMART_PRODUCT_ID) },
 	{ USB_DEVICE(AT_VENDOR_ID, AT_VTKIT3_PRODUCT_ID) },
+	{ USB_DEVICE(IBM_VENDOR_ID, IBM_PRODUCT_ID) },
 	{ }					/* Terminating entry */
 };
 
@@ -418,24 +420,40 @@ static int pl2303_detect_type(struct usb_serial *serial)
 	bcdDevice = le16_to_cpu(desc->bcdDevice);
 	bcdUSB = le16_to_cpu(desc->bcdUSB);
 
-	switch (bcdDevice) {
-	case 0x100:
-		/*
-		 * Assume it's an HXN-type if the device doesn't support the old read
-		 * request value.
-		 */
-		if (bcdUSB == 0x200 && !pl2303_supports_hx_status(serial))
-			return TYPE_HXN;
+	switch (bcdUSB) {
+	case 0x101:
+		/* USB 1.0.1? Let's assume they meant 1.1... */
+		fallthrough;
+	case 0x110:
+		switch (bcdDevice) {
+		case 0x300:
+			return TYPE_HX;
+		case 0x400:
+			return TYPE_HXD;
+		default:
+			return TYPE_HX;
+		}
 		break;
-	case 0x300:
-		if (bcdUSB == 0x200)
+	case 0x200:
+		switch (bcdDevice) {
+		case 0x100:
+		case 0x105:
+		case 0x305:
+		case 0x405:
+		case 0x605:
+			/*
+			 * Assume it's an HXN-type if the device doesn't
+			 * support the old read request value.
+			 */
+			if (!pl2303_supports_hx_status(serial))
+				return TYPE_HXN;
+			break;
+		case 0x300:
 			return TYPE_TA;
-
-		return TYPE_HX;
-	case 0x400:
-		return TYPE_HXD;
-	case 0x500:
-		return TYPE_TB;
+		case 0x500:
+			return TYPE_TB;
+		}
+		break;
 	}
 
 	dev_err(&serial->interface->dev,

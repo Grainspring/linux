@@ -1,9 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0
 
-//! Rust synchronisation primitives sample
-
-#![no_std]
-#![feature(allocator_api, global_asm)]
+//! Rust synchronisation primitives sample.
 
 use kernel::prelude::*;
 use kernel::{
@@ -16,13 +13,18 @@ module! {
     name: b"rust_sync",
     author: b"Rust for Linux Contributors",
     description: b"Rust synchronisation primitives sample",
-    license: b"GPL v2",
+    license: b"GPL",
+}
+
+kernel::init_static_sync! {
+    static SAMPLE_MUTEX: Mutex<u32> = 10;
+    static SAMPLE_CONDVAR: CondVar;
 }
 
 struct RustSync;
 
-impl KernelModule for RustSync {
-    fn init() -> Result<Self> {
+impl kernel::Module for RustSync {
+    fn init(_name: &'static CStr, _module: &'static ThisModule) -> Result<Self> {
         pr_info!("Rust synchronisation primitives sample (init)\n");
 
         // Test mutexes.
@@ -46,6 +48,16 @@ impl KernelModule for RustSync {
             cv.notify_one();
             cv.notify_all();
             cv.free_waiters();
+        }
+
+        // Test static mutex + condvar.
+        *SAMPLE_MUTEX.lock() = 20;
+
+        {
+            let mut guard = SAMPLE_MUTEX.lock();
+            while *guard != 20 {
+                let _ = SAMPLE_CONDVAR.wait(&mut guard);
+            }
         }
 
         // Test spinlocks.

@@ -12,21 +12,20 @@
 //! do so first instead of bypassing this crate.
 
 #![no_std]
-#![feature(
-    allocator_api,
-    associated_type_defaults,
-    const_fn_trait_bound,
-    const_mut_refs,
-    const_panic,
-    const_raw_ptr_deref,
-    const_unreachable_unchecked,
-    doc_cfg,
-    receiver_trait,
-    coerce_unsized,
-    dispatch_from_dyn,
-    unsize,
-    try_reserve
-)]
+#![feature(allocator_api)]
+#![feature(associated_type_defaults)]
+#![feature(concat_idents)]
+#![feature(const_mut_refs)]
+#![feature(const_ptr_offset_from)]
+#![feature(const_refs_to_cell)]
+#![feature(const_trait_impl)]
+#![feature(doc_cfg)]
+#![feature(generic_associated_types)]
+#![feature(ptr_metadata)]
+#![feature(receiver_trait)]
+#![feature(coerce_unsized)]
+#![feature(dispatch_from_dyn)]
+#![feature(unsize)]
 
 // Ensure conditional compilation based on the kernel configuration works;
 // otherwise we may silently break things like initcall handling.
@@ -40,18 +39,31 @@ mod allocator;
 #[doc(hidden)]
 pub mod bindings;
 
-pub mod buffer;
+#[cfg(CONFIG_ARM_AMBA)]
+pub mod amba;
 pub mod c_types;
 pub mod chrdev;
-mod error;
+#[cfg(CONFIG_COMMON_CLK)]
+pub mod clk;
+pub mod cred;
+pub mod device;
+pub mod driver;
+pub mod error;
 pub mod file;
-pub mod file_operations;
+pub mod gpio;
+pub mod hwrng;
+pub mod irq;
+pub mod kasync;
 pub mod miscdev;
+pub mod mm;
+#[cfg(CONFIG_NET)]
+pub mod net;
 pub mod pages;
+pub mod power;
+pub mod revocable;
 pub mod security;
 pub mod str;
 pub mod task;
-pub mod traits;
 
 pub mod linked_list;
 mod raw_list;
@@ -65,6 +77,8 @@ pub mod prelude;
 pub mod print;
 pub mod random;
 mod static_assert;
+#[doc(hidden)]
+pub mod std_vendor;
 pub mod sync;
 
 #[cfg(any(CONFIG_SYSCTL, doc))]
@@ -72,17 +86,26 @@ pub mod sync;
 pub mod sysctl;
 
 pub mod io_buffer;
+#[cfg(CONFIG_HAS_IOMEM)]
+pub mod io_mem;
 pub mod iov_iter;
 pub mod of;
-pub mod platdev;
+pub mod platform;
 mod types;
 pub mod user_ptr;
+
+#[cfg(CONFIG_KUNIT)]
+pub mod kunit;
 
 #[doc(hidden)]
 pub use build_error::build_error;
 
-pub use crate::error::{Error, Result};
-pub use crate::types::{Mode, ScopeGuard};
+pub use crate::error::{to_result, Error, Result};
+pub use crate::types::{
+    bit, bits_iter, ARef, AlwaysRefCounted, Bool, False, Mode, Opaque, ScopeGuard, True,
+};
+
+use core::marker::PhantomData;
 
 /// Page size defined in terms of the `PAGE_SHIFT` macro from C.
 ///
@@ -95,14 +118,14 @@ const __LOG_PREFIX: &[u8] = b"rust_kernel\0";
 /// The top level entrypoint to implementing a kernel module.
 ///
 /// For any teardown or cleanup operations, your type may implement [`Drop`].
-pub trait KernelModule: Sized + Sync {
+pub trait Module: Sized + Sync {
     /// Called at module initialization time.
     ///
     /// Use this method to perform whatever setup or registration your module
     /// should do.
     ///
     /// Equivalent to the `module_init` macro in the C API.
-    fn init() -> Result<Self>;
+    fn init(name: &'static str::CStr, module: &'static ThisModule) -> Result<Self>;
 }
 
 /// Equivalent to `THIS_MODULE` in the C API.
@@ -134,7 +157,11 @@ impl ThisModule {
             bindings::kernel_param_lock(self.0)
         }
 
-        KParamGuard { this_module: self }
+        KParamGuard {
+            #[cfg(CONFIG_SYSFS)]
+            this_module: self,
+            phantom: PhantomData,
+        }
     }
 }
 
@@ -142,14 +169,16 @@ impl ThisModule {
 ///
 /// Lock will be released when this struct is dropped.
 pub struct KParamGuard<'a> {
+    #[cfg(CONFIG_SYSFS)]
     this_module: &'a ThisModule,
+    phantom: PhantomData<&'a ()>,
 }
 
 #[cfg(CONFIG_SYSFS)]
 impl<'a> Drop for KParamGuard<'a> {
     fn drop(&mut self) {
         // SAFETY: `kernel_param_lock` will check if the pointer is null and
-        // use the built-in mutex in that case. The existance of `self`
+        // use the built-in mutex in that case. The existence of `self`
         // guarantees that the lock is held.
         unsafe { bindings::kernel_param_unlock(self.this_module.0) }
     }
@@ -167,10 +196,7 @@ impl<'a> Drop for KParamGuard<'a> {
 ///     b: u32,
 /// }
 ///
-/// fn test() {
-///     // This prints `8`.
-///     pr_info!("{}\n", offset_of!(Test, b));
-/// }
+/// assert_eq!(offset_of!(Test, b), 8);
 /// ```
 #[macro_export]
 macro_rules! offset_of {
@@ -195,30 +221,40 @@ macro_rules! offset_of {
 /// # Safety
 ///
 /// Callers must ensure that the pointer to the field is in fact a pointer to the specified field,
-/// as opposed to a pointer to another object of the same type.
+/// as opposed to a pointer to another object of the same type. If this condition is not met,
+/// any dereference of the resulting pointer is UB.
 ///
 /// # Example
 ///
 /// ```
-/// # use kernel::prelude::*;
 /// # use kernel::container_of;
 /// struct Test {
 ///     a: u64,
 ///     b: u32,
 /// }
 ///
-/// fn test() {
-///     let test = Test { a: 10, b: 20 };
-///     let b_ptr = &test.b;
-///     let test_alias = unsafe { container_of!(b_ptr, Test, b) };
-///     // This prints `true`.
-///     pr_info!("{}\n", core::ptr::eq(&test, test_alias));
-/// }
+/// let test = Test { a: 10, b: 20 };
+/// let b_ptr = &test.b;
+/// let test_alias = container_of!(b_ptr, Test, b);
+/// assert!(core::ptr::eq(&test, test_alias));
 /// ```
 #[macro_export]
 macro_rules! container_of {
     ($ptr:expr, $type:ty, $($f:tt)*) => {{
+        let ptr = $ptr as *const _ as *const u8;
         let offset = $crate::offset_of!($type, $($f)*);
-        unsafe { ($ptr as *const _ as *const u8).offset(-offset) as *const $type }
+        ptr.wrapping_offset(-offset) as *const $type
     }}
+}
+
+#[cfg(not(any(testlib, test)))]
+#[panic_handler]
+fn panic(info: &core::panic::PanicInfo<'_>) -> ! {
+    pr_emerg!("{}\n", info);
+    // SAFETY: FFI call.
+    unsafe { bindings::BUG() };
+    // Bindgen currently does not recognize `__noreturn` so `BUG` returns `()`
+    // instead of `!`.
+    // https://github.com/rust-lang/rust-bindgen/issues/2094
+    loop {}
 }

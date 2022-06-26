@@ -4,7 +4,7 @@ use kernel::{
     bindings,
     prelude::*,
     security,
-    sync::{Mutex, Ref},
+    sync::{Mutex, Ref, UniqueRef},
 };
 
 use crate::{
@@ -21,41 +21,41 @@ pub(crate) struct Context {
     manager: Mutex<Manager>,
 }
 
+#[allow(clippy::non_send_fields_in_send_ty)]
 unsafe impl Send for Context {}
 unsafe impl Sync for Context {}
 
 impl Context {
     pub(crate) fn new() -> Result<Ref<Self>> {
-        Ref::try_new_and_init(
-            Self {
-                // SAFETY: Init is called below.
-                manager: unsafe {
-                    Mutex::new(Manager {
-                        node: None,
-                        uid: None,
-                    })
-                },
+        let mut ctx = Pin::from(UniqueRef::try_new(Self {
+            // SAFETY: Init is called below.
+            manager: unsafe {
+                Mutex::new(Manager {
+                    node: None,
+                    uid: None,
+                })
             },
-            |mut ctx| {
-                // SAFETY: `manager` is also pinned when `ctx` is.
-                let manager = unsafe { ctx.as_mut().map_unchecked_mut(|c| &mut c.manager) };
-                kernel::mutex_init!(manager, "Context::manager");
-            },
-        )
+        })?);
+
+        // SAFETY: `manager` is also pinned when `ctx` is.
+        let manager = unsafe { ctx.as_mut().map_unchecked_mut(|c| &mut c.manager) };
+        kernel::mutex_init!(manager, "Context::manager");
+
+        Ok(ctx.into())
     }
 
     pub(crate) fn set_manager_node(&self, node_ref: NodeRef) -> Result {
         let mut manager = self.manager.lock();
         if manager.node.is_some() {
-            return Err(Error::EBUSY);
+            return Err(EBUSY);
         }
-        security::binder_set_context_mgr(&node_ref.node.owner.task)?;
+        security::binder_set_context_mgr(&node_ref.node.owner.cred)?;
 
         // TODO: Get the actual caller id.
         let caller_uid = bindings::kuid_t::default();
         if let Some(ref uid) = manager.uid {
             if uid.val != caller_uid.val {
-                return Err(Error::EPERM);
+                return Err(EPERM);
             }
         }
 

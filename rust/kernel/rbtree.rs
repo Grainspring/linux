@@ -16,14 +16,6 @@ use core::{
     ptr::{addr_of_mut, NonNull},
 };
 
-extern "C" {
-    fn rust_helper_rb_link_node(
-        node: *mut bindings::rb_node,
-        parent: *const bindings::rb_node,
-        rb_link: *mut *mut bindings::rb_node,
-    );
-}
-
 struct Node<K, V> {
     links: bindings::rb_node,
     key: K,
@@ -45,82 +37,83 @@ struct Node<K, V> {
 /// the system is out of memory.
 ///
 /// ```
-/// # use kernel::prelude::*;
 /// use kernel::rbtree::RBTree;
 ///
-/// fn rbtest() -> Result {
-///     // Create a new tree.
-///     let mut tree = RBTree::new();
+/// # fn test() -> Result {
+/// // Create a new tree.
+/// let mut tree = RBTree::new();
 ///
-///     // Insert three elements.
-///     tree.try_insert(20, 200)?;
-///     tree.try_insert(10, 100)?;
-///     tree.try_insert(30, 300)?;
+/// // Insert three elements.
+/// tree.try_insert(20, 200)?;
+/// tree.try_insert(10, 100)?;
+/// tree.try_insert(30, 300)?;
 ///
-///     // Check the nodes we just inserted.
-///     {
-///         let mut iter = tree.iter();
-///         assert_eq!(iter.next().unwrap(), (&10, &100));
-///         assert_eq!(iter.next().unwrap(), (&20, &200));
-///         assert_eq!(iter.next().unwrap(), (&30, &300));
-///         assert!(iter.next().is_none());
-///     }
-///
-///     // Print all elements.
-///     for (key, value) in &tree {
-///         pr_info!("{} = {}\n", key, value);
-///     }
-///
-///     // Replace one of the elements.
-///     tree.try_insert(10, 1000)?;
-///
-///     // Check that the tree reflects the replacement.
-///     {
-///         let mut iter = tree.iter();
-///         assert_eq!(iter.next().unwrap(), (&10, &1000));
-///         assert_eq!(iter.next().unwrap(), (&20, &200));
-///         assert_eq!(iter.next().unwrap(), (&30, &300));
-///         assert!(iter.next().is_none());
-///     }
-///
-///     // Change the value of one of the elements.
-///     *tree.get_mut(&30).unwrap() = 3000;
-///
-///     // Check that the tree reflects the update.
-///     {
-///         let mut iter = tree.iter();
-///         assert_eq!(iter.next().unwrap(), (&10, &1000));
-///         assert_eq!(iter.next().unwrap(), (&20, &200));
-///         assert_eq!(iter.next().unwrap(), (&30, &3000));
-///         assert!(iter.next().is_none());
-///     }
-///
-///     // Remove an element.
-///     tree.remove(&10);
-///
-///     // Check that the tree reflects the removal.
-///     {
-///         let mut iter = tree.iter();
-///         assert_eq!(iter.next().unwrap(), (&20, &200));
-///         assert_eq!(iter.next().unwrap(), (&30, &3000));
-///         assert!(iter.next().is_none());
-///     }
-///
-///     // Update all values.
-///     for value in tree.values_mut() {
-///         *value *= 10;
-///     }
-///
-///     // Check that the tree reflects the changes to values.
-///     {
-///         let mut iter = tree.iter();
-///         assert_eq!(iter.next().unwrap(), (&20, &2000));
-///         assert_eq!(iter.next().unwrap(), (&30, &30000));
-///         assert!(iter.next().is_none());
-///     }
-///
-///     Ok(())
+/// // Check the nodes we just inserted.
+/// {
+///     let mut iter = tree.iter();
+///     assert_eq!(iter.next().unwrap(), (&10, &100));
+///     assert_eq!(iter.next().unwrap(), (&20, &200));
+///     assert_eq!(iter.next().unwrap(), (&30, &300));
+///     assert!(iter.next().is_none());
 /// }
+///
+/// // Print all elements.
+/// for (key, value) in &tree {
+///     pr_info!("{} = {}\n", key, value);
+/// }
+///
+/// // Replace one of the elements.
+/// tree.try_insert(10, 1000)?;
+///
+/// // Check that the tree reflects the replacement.
+/// {
+///     let mut iter = tree.iter();
+///     assert_eq!(iter.next().unwrap(), (&10, &1000));
+///     assert_eq!(iter.next().unwrap(), (&20, &200));
+///     assert_eq!(iter.next().unwrap(), (&30, &300));
+///     assert!(iter.next().is_none());
+/// }
+///
+/// // Change the value of one of the elements.
+/// *tree.get_mut(&30).unwrap() = 3000;
+///
+/// // Check that the tree reflects the update.
+/// {
+///     let mut iter = tree.iter();
+///     assert_eq!(iter.next().unwrap(), (&10, &1000));
+///     assert_eq!(iter.next().unwrap(), (&20, &200));
+///     assert_eq!(iter.next().unwrap(), (&30, &3000));
+///     assert!(iter.next().is_none());
+/// }
+///
+/// // Remove an element.
+/// tree.remove(&10);
+///
+/// // Check that the tree reflects the removal.
+/// {
+///     let mut iter = tree.iter();
+///     assert_eq!(iter.next().unwrap(), (&20, &200));
+///     assert_eq!(iter.next().unwrap(), (&30, &3000));
+///     assert!(iter.next().is_none());
+/// }
+///
+/// // Update all values.
+/// for value in tree.values_mut() {
+///     *value *= 10;
+/// }
+///
+/// // Check that the tree reflects the changes to values.
+/// {
+///     let mut iter = tree.iter();
+///     assert_eq!(iter.next().unwrap(), (&20, &2000));
+///     assert_eq!(iter.next().unwrap(), (&30, &30000));
+///     assert!(iter.next().is_none());
+/// }
+///
+/// # Ok(())
+/// # }
+/// #
+/// # assert_eq!(test(), Ok(()));
 /// ```
 ///
 /// In the example below, we first allocate a node, acquire a spinlock, then insert the node into
@@ -128,7 +121,6 @@ struct Node<K, V> {
 /// holding a spinlock.
 ///
 /// ```
-/// # use kernel::prelude::*;
 /// use kernel::{rbtree::RBTree, sync::SpinLock};
 ///
 /// fn insert_test(tree: &SpinLock<RBTree<u32, u32>>) -> Result {
@@ -146,56 +138,57 @@ struct Node<K, V> {
 /// In the example below, we reuse an existing node allocation from an element we removed.
 ///
 /// ```
-/// # use kernel::prelude::*;
 /// use kernel::rbtree::RBTree;
 ///
-/// fn reuse_test() -> Result {
-///     // Create a new tree.
-///     let mut tree = RBTree::new();
+/// # fn test() -> Result {
+/// // Create a new tree.
+/// let mut tree = RBTree::new();
 ///
-///     // Insert three elements.
-///     tree.try_insert(20, 200)?;
-///     tree.try_insert(10, 100)?;
-///     tree.try_insert(30, 300)?;
+/// // Insert three elements.
+/// tree.try_insert(20, 200)?;
+/// tree.try_insert(10, 100)?;
+/// tree.try_insert(30, 300)?;
 ///
-///     // Check the nodes we just inserted.
-///     {
-///         let mut iter = tree.iter();
-///         assert_eq!(iter.next().unwrap(), (&10, &100));
-///         assert_eq!(iter.next().unwrap(), (&20, &200));
-///         assert_eq!(iter.next().unwrap(), (&30, &300));
-///         assert!(iter.next().is_none());
-///     }
-///
-///     // Remove a node, getting back ownership of it.
-///     let existing = tree.remove_node(&30).unwrap();
-///
-///     // Check that the tree reflects the removal.
-///     {
-///         let mut iter = tree.iter();
-///         assert_eq!(iter.next().unwrap(), (&10, &100));
-///         assert_eq!(iter.next().unwrap(), (&20, &200));
-///         assert!(iter.next().is_none());
-///     }
-///
-///     // Turn the node into a reservation so that we can reuse it with a different key/value.
-///     let reservation = existing.into_reservation();
-///
-///     // Insert a new node into the tree, reusing the previous allocation. This is guaranteed to
-///     // succeed (no memory allocations).
-///     tree.insert(reservation.into_node(15, 150));
-///
-///     // Check that the tree reflect the new insertion.
-///     {
-///         let mut iter = tree.iter();
-///         assert_eq!(iter.next().unwrap(), (&10, &100));
-///         assert_eq!(iter.next().unwrap(), (&15, &150));
-///         assert_eq!(iter.next().unwrap(), (&20, &200));
-///         assert!(iter.next().is_none());
-///     }
-///
-///     Ok(())
+/// // Check the nodes we just inserted.
+/// {
+///     let mut iter = tree.iter();
+///     assert_eq!(iter.next().unwrap(), (&10, &100));
+///     assert_eq!(iter.next().unwrap(), (&20, &200));
+///     assert_eq!(iter.next().unwrap(), (&30, &300));
+///     assert!(iter.next().is_none());
 /// }
+///
+/// // Remove a node, getting back ownership of it.
+/// let existing = tree.remove_node(&30).unwrap();
+///
+/// // Check that the tree reflects the removal.
+/// {
+///     let mut iter = tree.iter();
+///     assert_eq!(iter.next().unwrap(), (&10, &100));
+///     assert_eq!(iter.next().unwrap(), (&20, &200));
+///     assert!(iter.next().is_none());
+/// }
+///
+/// // Turn the node into a reservation so that we can reuse it with a different key/value.
+/// let reservation = existing.into_reservation();
+///
+/// // Insert a new node into the tree, reusing the previous allocation. This is guaranteed to
+/// // succeed (no memory allocations).
+/// tree.insert(reservation.into_node(15, 150));
+///
+/// // Check that the tree reflect the new insertion.
+/// {
+///     let mut iter = tree.iter();
+///     assert_eq!(iter.next().unwrap(), (&10, &100));
+///     assert_eq!(iter.next().unwrap(), (&15, &150));
+///     assert_eq!(iter.next().unwrap(), (&20, &200));
+///     assert!(iter.next().is_none());
+/// }
+///
+/// # Ok(())
+/// # }
+/// #
+/// # assert_eq!(test(), Ok(()));
 /// ```
 pub struct RBTree<K, V> {
     root: bindings::rb_root,
@@ -289,7 +282,7 @@ impl<K, V> RBTree<K, V> {
         // "forgot" it with `Box::into_raw`.
         // SAFETY: All pointers are non-null and valid (`*new_link` is null, but `new_link` is a
         // mutable reference).
-        unsafe { rust_helper_rb_link_node(node_links, parent, new_link) };
+        unsafe { bindings::rb_link_node(node_links, parent, new_link) };
 
         // SAFETY: All pointers are valid. `node` has just been inserted into the tree.
         unsafe { bindings::rb_insert_color(node_links, &mut self.root) };
@@ -330,7 +323,7 @@ impl<K, V> RBTree<K, V> {
     where
         K: Ord,
     {
-        // SAFETY: the `find` return value is a node in the tree, so it is valid.
+        // SAFETY: The `find` return value is a node in the tree, so it is valid.
         self.find(key)
             .map(|mut node| unsafe { &mut node.as_mut().value })
     }
@@ -344,13 +337,13 @@ impl<K, V> RBTree<K, V> {
     {
         let mut node = self.find(key)?;
 
-        // SAFETY: the `find` return value is a node in the tree, so it is valid.
+        // SAFETY: The `find` return value is a node in the tree, so it is valid.
         unsafe { bindings::rb_erase(&mut node.as_mut().links, &mut self.root) };
 
         // INVARIANT: The node is being returned and the caller may free it, however, it was
         // removed from the tree. So the invariants still hold.
         Some(RBTreeNode {
-            // SAFETY: the `find` return value was a node in the tree, so it is valid.
+            // SAFETY: The `find` return value was a node in the tree, so it is valid.
             node: unsafe { Box::from_raw(node.as_ptr()) },
         })
     }

@@ -5,6 +5,7 @@
 #include "tests.h"
 #include "debug.h"
 #include "pmu.h"
+#include "pmu-hybrid.h"
 #include <errno.h>
 #include <linux/kernel.h>
 
@@ -63,7 +64,7 @@ static int perf_evsel__roundtrip_cache_name_test(void)
 	return ret;
 }
 
-static int __perf_evsel__name_array_test(const char *names[], int nr_names,
+static int __perf_evsel__name_array_test(const char *const names[], int nr_names,
 					 int distance)
 {
 	int i, err;
@@ -98,11 +99,12 @@ out_delete_evlist:
 #define perf_evsel__name_array_test(names, distance) \
 	__perf_evsel__name_array_test(names, ARRAY_SIZE(names), distance)
 
-int test__perf_evsel__roundtrip_name_test(struct test *test __maybe_unused, int subtest __maybe_unused)
+static int test__perf_evsel__roundtrip_name_test(struct test_suite *test __maybe_unused,
+						 int subtest __maybe_unused)
 {
 	int err = 0, ret = 0;
 
-	if (perf_pmu__has_hybrid())
+	if (perf_pmu__has_hybrid() && perf_pmu__hybrid_mounted("cpu_atom"))
 		return perf_evsel__name_array_test(evsel__hw_names, 2);
 
 	err = perf_evsel__name_array_test(evsel__hw_names, 1);
@@ -119,3 +121,5 @@ int test__perf_evsel__roundtrip_name_test(struct test *test __maybe_unused, int 
 
 	return ret;
 }
+
+DEFINE_SUITE("Roundtrip evsel->name", perf_evsel__roundtrip_name_test);

@@ -27,7 +27,17 @@
 
 #define ARRAY_SIZE(arr) (sizeof(arr) / sizeof(arr[0]))
 
+#define _stringify_1(x)	#x
+#define _stringify(x)	_stringify_1(x)
+
 #define KSYM_NAME_LEN		512
+
+/* A substantially bigger size than the current maximum. */
+#define KSYM_NAME_LEN_BUFFER	2048
+_Static_assert(
+	KSYM_NAME_LEN_BUFFER == KSYM_NAME_LEN * 4,
+	"Please keep KSYM_NAME_LEN_BUFFER in sync with KSYM_NAME_LEN"
+);
 
 struct sym_entry {
 	unsigned long long addr;
@@ -70,7 +80,7 @@ static unsigned char best_table_len[256];
 
 static void usage(void)
 {
-	fprintf(stderr, "Usage: kallsyms [--all-symbols] "
+	fprintf(stderr, "Usage: kallsyms [--all-symbols] [--absolute-percpu] "
 			"[--base-relative] < in.map > out.S\n");
 	exit(1);
 }
@@ -108,10 +118,11 @@ static bool is_ignored_symbol(const char *name, char type)
 	/* Symbol names that begin with the following are ignored.*/
 	static const char * const ignored_prefixes[] = {
 		"$",			/* local symbols for ARM, MIPS, etc. */
-		".LASANPC",		/* s390 kasan local symbols */
+		".L",			/* local labels, .LBB,.Ltmpxxx,.L__unnamed_xx,.LASANPC, etc. */
 		"__crc_",		/* modversions */
 		"__efistub_",		/* arm64 EFI stub namespace */
-		"__kvm_nvhe_",		/* arm64 non-VHE KVM namespace */
+		"__kvm_nvhe_$",		/* arm64 local symbols in non-VHE KVM namespace */
+		"__kvm_nvhe_.L",	/* arm64 local symbols in non-VHE KVM namespace */
 		"__AArch64ADRPThunk_",	/* arm64 lld */
 		"__ARMV5PILongThunk_",	/* arm lld */
 		"__ARMV7PILongThunk_",
@@ -197,15 +208,15 @@ static void check_symbol_range(const char *sym, unsigned long long addr,
 
 static struct sym_entry *read_symbol(FILE *in)
 {
-	char name[500], type;
+	char name[KSYM_NAME_LEN_BUFFER+1], type;
 	unsigned long long addr;
 	unsigned int len;
 	struct sym_entry *sym;
 	int rc;
 
-	rc = fscanf(in, "%llx %c %499s\n", &addr, &type, name);
+	rc = fscanf(in, "%llx %c %" _stringify(KSYM_NAME_LEN_BUFFER) "s\n", &addr, &type, name);
 	if (rc != 3) {
-		if (rc != EOF && fgets(name, 500, in) == NULL)
+		if (rc != EOF && fgets(name, sizeof(name), in) == NULL)
 			fprintf(stderr, "Read error or end of file.\n");
 		return NULL;
 	}
@@ -470,33 +481,31 @@ static void write_src(void)
 		if ((i & 0xFF) == 0)
 			markers[i >> 8] = off;
 
-		/*
-		 * There cannot be any symbol of length zero -- we use that
-		 * to mark a "big" symbol (and it doesn't make sense anyway).
-		 */
+		/* There cannot be any symbol of length zero. */
 		if (table[i]->len == 0) {
 			fprintf(stderr, "kallsyms failure: "
 				"unexpected zero symbol length\n");
 			exit(EXIT_FAILURE);
 		}
 
-		/* Only lengths that fit in up to two bytes are supported. */
-		if (table[i]->len > 0xFFFF) {
+		/* Only lengths that fit in up-to-two-byte ULEB128 are supported. */
+		if (table[i]->len > 0x3FFF) {
 			fprintf(stderr, "kallsyms failure: "
 				"unexpected huge symbol length\n");
 			exit(EXIT_FAILURE);
 		}
 
-		if (table[i]->len <= 0xFF) {
+		/* Encode length with ULEB128. */
+		if (table[i]->len <= 0x7F) {
 			/* Most symbols use a single byte for the length. */
 			printf("\t.byte 0x%02x", table[i]->len);
 			off += table[i]->len + 1;
 		} else {
-			/* "Big" symbols use a zero and then two bytes. */
-			printf("\t.byte 0x00, 0x%02x, 0x%02x",
-				(table[i]->len >> 8) & 0xFF,
-				table[i]->len & 0xFF);
-			off += table[i]->len + 3;
+			/* "Big" symbols use two bytes. */
+			printf("\t.byte 0x%02x, 0x%02x",
+				(table[i]->len & 0x7F) | 0x80,
+				(table[i]->len >> 7) & 0x7F);
+			off += table[i]->len + 2;
 		}
 		for (k = 0; k < table[i]->len; k++)
 			printf(", 0x%02x", table[i]->sym[k]);

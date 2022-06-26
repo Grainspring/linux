@@ -87,7 +87,9 @@ static const struct ipa_gsi_endpoint_data ipa_gsi_endpoint_data[] = {
 				.aggregation	= true,
 				.status_enable	= true,
 				.rx = {
+					.buffer_size	= 8192,
 					.pad_align	= ilog2(sizeof(u32)),
+					.aggr_time_limit = 500,
 				},
 			},
 		},
@@ -106,6 +108,7 @@ static const struct ipa_gsi_endpoint_data ipa_gsi_endpoint_data[] = {
 			.filter_support	= true,
 			.config = {
 				.resource_group	= IPA_RSRC_GROUP_SRC_UL_DL,
+				.checksum       = true,
 				.qmap		= true,
 				.status_enable	= true,
 				.tx = {
@@ -129,9 +132,12 @@ static const struct ipa_gsi_endpoint_data ipa_gsi_endpoint_data[] = {
 		.endpoint = {
 			.config = {
 				.resource_group	= IPA_RSRC_GROUP_DST_UL_DL_DPL,
+				.checksum       = true,
 				.qmap		= true,
 				.aggregation	= true,
 				.rx = {
+					.buffer_size	= 8192,
+					.aggr_time_limit = 500,
 					.aggr_close_eof	= true,
 				},
 			},
@@ -416,18 +422,13 @@ static const struct ipa_mem_data ipa_mem_data = {
 /* Interconnect rates are in 1000 byte/second units */
 static const struct ipa_interconnect_data ipa_interconnect_data[] = {
 	{
-		.name			= "ipa_to_llcc",
+		.name			= "memory",
 		.peak_bandwidth		= 600000,	/* 600 MBps */
-		.average_bandwidth	= 150000,	/* 150 MBps */
-	},
-	{
-		.name			= "llcc_to_ebi1",
-		.peak_bandwidth		= 1804000,	/* 1.804 GBps */
 		.average_bandwidth	= 150000,	/* 150 MBps */
 	},
 	/* Average rate is unused for the next interconnect */
 	{
-		.name			= "appss_to_ipa",
+		.name			= "config",
 		.peak_bandwidth		= 74000,	/* 74 MBps */
 		.average_bandwidth	= 0,		/* unused */
 	},
@@ -435,7 +436,7 @@ static const struct ipa_interconnect_data ipa_interconnect_data[] = {
 };
 
 /* Clock and interconnect configuration data for an SoC having IPA v4.9 */
-static const struct ipa_clock_data ipa_clock_data = {
+static const struct ipa_power_data ipa_power_data = {
 	.core_clock_rate	= 60 * 1000 * 1000,	/* Hz */
 	.interconnect_count	= ARRAY_SIZE(ipa_interconnect_data),
 	.interconnect_data	= ipa_interconnect_data,
@@ -450,5 +451,5 @@ const struct ipa_data ipa_data_v4_9 = {
 	.endpoint_data	= ipa_gsi_endpoint_data,
 	.resource_data	= &ipa_resource_data,
 	.mem_data	= &ipa_mem_data,
-	.clock_data	= &ipa_clock_data,
+	.power_data	= &ipa_power_data,
 };

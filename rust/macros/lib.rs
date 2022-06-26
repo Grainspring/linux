@@ -2,18 +2,19 @@
 
 //! Crate for all kernel procedural macros.
 
+mod helpers;
 mod module;
 
 use proc_macro::TokenStream;
 
 /// Declares a kernel module.
 ///
-/// The `type` argument should be a type which implements the [`KernelModule`]
+/// The `type` argument should be a type which implements the [`Module`]
 /// trait. Also accepts various forms of kernel metadata.
 ///
 /// C header: [`include/linux/moduleparam.h`](../../../include/linux/moduleparam.h)
 ///
-/// [`KernelModule`]: ../kernel/trait.KernelModule.html
+/// [`Module`]: ../kernel/trait.Module.html
 ///
 /// # Examples
 ///
@@ -21,11 +22,11 @@ use proc_macro::TokenStream;
 /// use kernel::prelude::*;
 ///
 /// module!{
-///     type: MyKernelModule,
+///     type: MyModule,
 ///     name: b"my_kernel_module",
 ///     author: b"Rust for Linux Contributors",
 ///     description: b"My very own kernel module!",
-///     license: b"GPL v2",
+///     license: b"GPL",
 ///     params: {
 ///        my_i32: i32 {
 ///            default: 42,
@@ -40,9 +41,9 @@ use proc_macro::TokenStream;
 ///    },
 /// }
 ///
-/// struct MyKernelModule;
+/// struct MyModule;
 ///
-/// impl KernelModule for MyKernelModule {
+/// impl kernel::Module for MyModule {
 ///     fn init() -> Result<Self> {
 ///         // If the parameter is writeable, then the kparam lock must be
 ///         // taken to read the parameter:
@@ -53,13 +54,13 @@ use proc_macro::TokenStream;
 ///         // If the parameter is read only, it can be read without locking
 ///         // the kernel parameters:
 ///         pr_info!("i32 param is:  {}\n", my_i32.read());
-///         Ok(MyKernelModule)
+///         Ok(Self)
 ///     }
 /// }
 /// ```
 ///
 /// # Supported argument types
-///   - `type`: type which implements the [`KernelModule`] trait (required).
+///   - `type`: type which implements the [`Module`] trait (required).
 ///   - `name`: byte array of the name of the kernel module (required).
 ///   - `author`: byte array of the author of the kernel module.
 ///   - `description`: byte array of the description of the kernel module.
@@ -90,38 +91,4 @@ use proc_macro::TokenStream;
 #[proc_macro]
 pub fn module(ts: TokenStream) -> TokenStream {
     module::module(ts)
-}
-
-/// Declares a kernel module that exposes a single misc device.
-///
-/// The `type` argument should be a type which implements the [`FileOpener`] trait. Also accepts
-/// various forms of kernel metadata.
-///
-/// C header: [`include/linux/moduleparam.h`](../../../include/linux/moduleparam.h)
-///
-/// [`FileOpener`]: ../kernel/file_operations/trait.FileOpener.html
-///
-/// # Examples
-///
-/// ```ignore
-/// use kernel::prelude::*;
-///
-/// module_misc_device! {
-///     type: MyFile,
-///     name: b"my_miscdev_kernel_module",
-///     author: b"Rust for Linux Contributors",
-///     description: b"My very own misc device kernel module!",
-///     license: b"GPL v2",
-/// }
-///
-/// #[derive(Default)]
-/// struct MyFile;
-///
-/// impl kernel::file_operations::FileOperations for MyFile {
-///     kernel::declare_file_operations!();
-/// }
-/// ```
-#[proc_macro]
-pub fn module_misc_device(ts: TokenStream) -> TokenStream {
-    module::module_misc_device(ts)
 }

@@ -1,18 +1,13 @@
 // SPDX-License-Identifier: GPL-2.0
 
-//! Rust miscellaneous device sample
-
-#![no_std]
-#![feature(allocator_api, global_asm)]
+//! Rust miscellaneous device sample.
 
 use kernel::prelude::*;
 use kernel::{
-    c_str,
-    file::File,
-    file_operations::{FileOpener, FileOperations},
+    file::{self, File},
     io_buffer::{IoBufferReader, IoBufferWriter},
     miscdev,
-    sync::{CondVar, Mutex, Ref},
+    sync::{CondVar, Mutex, Ref, RefBorrow, UniqueRef},
 };
 
 module! {
@@ -20,7 +15,7 @@ module! {
     name: b"rust_miscdev",
     author: b"Rust for Linux Contributors",
     description: b"Rust miscellaneous device sample",
-    license: b"GPL v2",
+    license: b"GPL",
 }
 
 const MAX_TOKENS: usize = 3;
@@ -35,43 +30,41 @@ struct SharedState {
 }
 
 impl SharedState {
-    fn try_new() -> Result<Pin<Ref<Self>>> {
-        Ok(Ref::pinned(Ref::try_new_and_init(
-            Self {
-                // SAFETY: `condvar_init!` is called below.
-                state_changed: unsafe { CondVar::new() },
-                // SAFETY: `mutex_init!` is called below.
-                inner: unsafe { Mutex::new(SharedStateInner { token_count: 0 }) },
-            },
-            |mut state| {
-                // SAFETY: `state_changed` is pinned when `state` is.
-                let pinned = unsafe { state.as_mut().map_unchecked_mut(|s| &mut s.state_changed) };
-                kernel::condvar_init!(pinned, "SharedState::state_changed");
-                // SAFETY: `inner` is pinned when `state` is.
-                let pinned = unsafe { state.as_mut().map_unchecked_mut(|s| &mut s.inner) };
-                kernel::mutex_init!(pinned, "SharedState::inner");
-            },
-        )?))
+    fn try_new() -> Result<Ref<Self>> {
+        let mut state = Pin::from(UniqueRef::try_new(Self {
+            // SAFETY: `condvar_init!` is called below.
+            state_changed: unsafe { CondVar::new() },
+            // SAFETY: `mutex_init!` is called below.
+            inner: unsafe { Mutex::new(SharedStateInner { token_count: 0 }) },
+        })?);
+
+        // SAFETY: `state_changed` is pinned when `state` is.
+        let pinned = unsafe { state.as_mut().map_unchecked_mut(|s| &mut s.state_changed) };
+        kernel::condvar_init!(pinned, "SharedState::state_changed");
+
+        // SAFETY: `inner` is pinned when `state` is.
+        let pinned = unsafe { state.as_mut().map_unchecked_mut(|s| &mut s.inner) };
+        kernel::mutex_init!(pinned, "SharedState::inner");
+
+        Ok(state.into())
     }
 }
 
 struct Token;
-
-impl FileOpener<Pin<Ref<SharedState>>> for Token {
-    fn open(shared: &Pin<Ref<SharedState>>) -> Result<Self::Wrapper> {
-        Ok(shared.clone())
-    }
-}
-
-impl FileOperations for Token {
-    type Wrapper = Pin<Ref<SharedState>>;
+impl file::Operations for Token {
+    type Data = Ref<SharedState>;
+    type OpenData = Ref<SharedState>;
 
     kernel::declare_file_operations!(read, write);
 
-    fn read<T: IoBufferWriter>(
-        shared: &Ref<SharedState>,
+    fn open(shared: &Ref<SharedState>, _file: &File) -> Result<Self::Data> {
+        Ok(shared.clone())
+    }
+
+    fn read(
+        shared: RefBorrow<'_, SharedState>,
         _: &File,
-        data: &mut T,
+        data: &mut impl IoBufferWriter,
         offset: u64,
     ) -> Result<usize> {
         // Succeed if the caller doesn't provide a buffer or if not at the start.
@@ -85,7 +78,7 @@ impl FileOperations for Token {
             // Wait until we are allowed to decrement the token count or a signal arrives.
             while inner.token_count == 0 {
                 if shared.state_changed.wait(&mut inner) {
-                    return Err(Error::EINTR);
+                    return Err(EINTR);
                 }
             }
 
@@ -101,10 +94,10 @@ impl FileOperations for Token {
         Ok(1)
     }
 
-    fn write<T: IoBufferReader>(
-        shared: &Ref<SharedState>,
+    fn write(
+        shared: RefBorrow<'_, SharedState>,
         _: &File,
-        data: &mut T,
+        data: &mut impl IoBufferReader,
         _offset: u64,
     ) -> Result<usize> {
         {
@@ -113,7 +106,7 @@ impl FileOperations for Token {
             // Wait until we are allowed to increment the token count or a signal arrives.
             while inner.token_count == MAX_TOKENS {
                 if shared.state_changed.wait(&mut inner) {
-                    return Err(Error::EINTR);
+                    return Err(EINTR);
                 }
             }
 
@@ -128,17 +121,17 @@ impl FileOperations for Token {
 }
 
 struct RustMiscdev {
-    _dev: Pin<Box<miscdev::Registration<Pin<Ref<SharedState>>>>>,
+    _dev: Pin<Box<miscdev::Registration<Token>>>,
 }
 
-impl KernelModule for RustMiscdev {
-    fn init() -> Result<Self> {
+impl kernel::Module for RustMiscdev {
+    fn init(name: &'static CStr, _module: &'static ThisModule) -> Result<Self> {
         pr_info!("Rust miscellaneous device sample (init)\n");
 
         let state = SharedState::try_new()?;
 
         Ok(RustMiscdev {
-            _dev: miscdev::Registration::new_pinned::<Token>(c_str!("rust_miscdev"), None, state)?,
+            _dev: miscdev::Registration::new_pinned(fmt!("{name}"), state)?,
         })
     }
 }

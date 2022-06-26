@@ -5,25 +5,11 @@
 //! C header: [`include/linux/uio.h`](../../../../include/linux/uio.h)
 
 use crate::{
-    bindings, c_types,
-    error::Error,
+    bindings,
+    error::code::*,
     io_buffer::{IoBufferReader, IoBufferWriter},
     Result,
 };
-
-extern "C" {
-    fn rust_helper_copy_to_iter(
-        addr: *const c_types::c_void,
-        bytes: usize,
-        i: *mut bindings::iov_iter,
-    ) -> usize;
-
-    fn rust_helper_copy_from_iter(
-        addr: *mut c_types::c_void,
-        bytes: usize,
-        i: *mut bindings::iov_iter,
-    ) -> usize;
-}
 
 /// Wraps the kernel's `struct iov_iter`.
 ///
@@ -61,7 +47,7 @@ impl IoBufferWriter for IovIter {
             // SAFETY: `IovIter::ptr` is guaranteed to be valid by the type invariants.
             let written = unsafe { bindings::iov_iter_zero(len, self.ptr) };
             if written == 0 {
-                return Err(Error::EFAULT);
+                return Err(EFAULT);
             }
 
             len -= written;
@@ -70,9 +56,9 @@ impl IoBufferWriter for IovIter {
     }
 
     unsafe fn write_raw(&mut self, data: *const u8, len: usize) -> Result {
-        let res = unsafe { rust_helper_copy_to_iter(data as _, len, self.ptr) };
+        let res = unsafe { bindings::copy_to_iter(data as _, len, self.ptr) };
         if res != len {
-            Err(Error::EFAULT)
+            Err(EFAULT)
         } else {
             Ok(())
         }
@@ -85,9 +71,9 @@ impl IoBufferReader for IovIter {
     }
 
     unsafe fn read_raw(&mut self, out: *mut u8, len: usize) -> Result {
-        let res = unsafe { rust_helper_copy_from_iter(out as _, len, self.ptr) };
+        let res = unsafe { bindings::copy_from_iter(out as _, len, self.ptr) };
         if res != len {
-            Err(Error::EFAULT)
+            Err(EFAULT)
         } else {
             Ok(())
         }

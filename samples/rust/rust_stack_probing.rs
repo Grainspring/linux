@@ -1,10 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0
 
-//! Rust stack probing sample
-
-#![no_std]
-#![feature(allocator_api, global_asm)]
-#![feature(bench_black_box)]
+//! Rust stack probing sample.
 
 use kernel::prelude::*;
 
@@ -13,13 +9,13 @@ module! {
     name: b"rust_stack_probing",
     author: b"Rust for Linux Contributors",
     description: b"Rust stack probing sample",
-    license: b"GPL v2",
+    license: b"GPL",
 }
 
 struct RustStackProbing;
 
-impl KernelModule for RustStackProbing {
-    fn init() -> Result<Self> {
+impl kernel::Module for RustStackProbing {
+    fn init(_name: &'static CStr, _module: &'static ThisModule) -> Result<Self> {
         pr_info!("Rust stack probing sample (init)\n");
 
         // Including this large variable on the stack will trigger

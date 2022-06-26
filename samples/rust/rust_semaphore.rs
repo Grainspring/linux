@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0
 
-//! Rust semaphore sample
+//! Rust semaphore sample.
 //!
 //! A counting semaphore that can be used by userspace.
 //!
@@ -13,19 +13,15 @@
 //! before decrementing); `echo -n 123 > semaphore` increments the semaphore by 3, potentially
 //! unblocking up to 3 blocked readers.
 
-#![no_std]
-#![feature(allocator_api, global_asm)]
-
 use core::sync::atomic::{AtomicU64, Ordering};
 use kernel::{
-    c_str, condvar_init, declare_file_operations,
-    file::File,
-    file_operations::{FileOpener, FileOperations, IoctlCommand, IoctlHandler},
+    condvar_init, declare_file_operations,
+    file::{self, File, IoctlCommand, IoctlHandler},
     io_buffer::{IoBufferReader, IoBufferWriter},
     miscdev::Registration,
     mutex_init,
     prelude::*,
-    sync::{CondVar, Mutex, Ref},
+    sync::{CondVar, Mutex, Ref, UniqueRef},
     user_ptr::{UserSlicePtrReader, UserSlicePtrWriter},
 };
 
@@ -34,7 +30,7 @@ module! {
     name: b"rust_semaphore",
     author: b"Rust for Linux Contributors",
     description: b"Rust semaphore sample",
-    license: b"GPL v2",
+    license: b"GPL",
 }
 
 struct SemaphoreInner {
@@ -57,7 +53,7 @@ impl FileState {
         let mut inner = self.shared.inner.lock();
         while inner.count == 0 {
             if self.shared.changed.wait(&mut inner) {
-                return Err(Error::EINTR);
+                return Err(EINTR);
             }
         }
         inner.count -= 1;
@@ -65,19 +61,20 @@ impl FileState {
     }
 }
 
-impl FileOpener<Ref<Semaphore>> for FileState {
-    fn open(shared: &Ref<Semaphore>) -> Result<Box<Self>> {
+impl file::Operations for FileState {
+    type Data = Box<Self>;
+    type OpenData = Ref<Semaphore>;
+
+    declare_file_operations!(read, write, ioctl);
+
+    fn open(shared: &Ref<Semaphore>, _file: &File) -> Result<Box<Self>> {
         Ok(Box::try_new(Self {
             read_count: AtomicU64::new(0),
             shared: shared.clone(),
         })?)
     }
-}
 
-impl FileOperations for FileState {
-    declare_file_operations!(read, write, ioctl);
-
-    fn read<T: IoBufferWriter>(this: &Self, _: &File, data: &mut T, offset: u64) -> Result<usize> {
+    fn read(this: &Self, _: &File, data: &mut impl IoBufferWriter, offset: u64) -> Result<usize> {
         if data.is_empty() || offset > 0 {
             return Ok(0);
         }
@@ -87,7 +84,7 @@ impl FileOperations for FileState {
         Ok(1)
     }
 
-    fn write<T: IoBufferReader>(this: &Self, _: &File, data: &mut T, _offs: u64) -> Result<usize> {
+    fn write(this: &Self, _: &File, data: &mut impl IoBufferReader, _offs: u64) -> Result<usize> {
         {
             let mut inner = this.shared.inner.lock();
             inner.count = inner.count.saturating_add(data.len());
@@ -106,39 +103,36 @@ impl FileOperations for FileState {
 }
 
 struct RustSemaphore {
-    _dev: Pin<Box<Registration<Ref<Semaphore>>>>,
+    _dev: Pin<Box<Registration<FileState>>>,
 }
 
-impl KernelModule for RustSemaphore {
-    fn init() -> Result<Self> {
+impl kernel::Module for RustSemaphore {
+    fn init(name: &'static CStr, _module: &'static ThisModule) -> Result<Self> {
         pr_info!("Rust semaphore sample (init)\n");
 
-        let sema = Ref::try_new_and_init(
-            Semaphore {
-                // SAFETY: `condvar_init!` is called below.
-                changed: unsafe { CondVar::new() },
+        let mut sema = Pin::from(UniqueRef::try_new(Semaphore {
+            // SAFETY: `condvar_init!` is called below.
+            changed: unsafe { CondVar::new() },
 
-                // SAFETY: `mutex_init!` is called below.
-                inner: unsafe {
-                    Mutex::new(SemaphoreInner {
-                        count: 0,
-                        max_seen: 0,
-                    })
-                },
+            // SAFETY: `mutex_init!` is called below.
+            inner: unsafe {
+                Mutex::new(SemaphoreInner {
+                    count: 0,
+                    max_seen: 0,
+                })
             },
-            |mut sema| {
-                // SAFETY: `changed` is pinned when `sema` is.
-                let pinned = unsafe { sema.as_mut().map_unchecked_mut(|s| &mut s.changed) };
-                condvar_init!(pinned, "Semaphore::changed");
+        })?);
 
-                // SAFETY: `inner` is pinned when `sema` is.
-                let pinned = unsafe { sema.as_mut().map_unchecked_mut(|s| &mut s.inner) };
-                mutex_init!(pinned, "Semaphore::inner");
-            },
-        )?;
+        // SAFETY: `changed` is pinned when `sema` is.
+        let pinned = unsafe { sema.as_mut().map_unchecked_mut(|s| &mut s.changed) };
+        condvar_init!(pinned, "Semaphore::changed");
+
+        // SAFETY: `inner` is pinned when `sema` is.
+        let pinned = unsafe { sema.as_mut().map_unchecked_mut(|s| &mut s.inner) };
+        mutex_init!(pinned, "Semaphore::inner");
 
         Ok(Self {
-            _dev: Registration::new_pinned::<FileState>(c_str!("rust_semaphore"), None, sema)?,
+            _dev: Registration::new_pinned(fmt!("{name}"), sema.into())?,
         })
     }
 }
@@ -153,7 +147,7 @@ const IOCTL_GET_READ_COUNT: u32 = 0x80086301;
 const IOCTL_SET_READ_COUNT: u32 = 0x40086301;
 
 impl IoctlHandler for FileState {
-    type Target = Self;
+    type Target<'a> = &'a Self;
 
     fn read(this: &Self, _: &File, cmd: u32, writer: &mut UserSlicePtrWriter) -> Result<i32> {
         match cmd {
@@ -161,7 +155,7 @@ impl IoctlHandler for FileState {
                 writer.write(&this.read_count.load(Ordering::Relaxed))?;
                 Ok(0)
             }
-            _ => Err(Error::EINVAL),
+            _ => Err(EINVAL),
         }
     }
 
@@ -171,7 +165,7 @@ impl IoctlHandler for FileState {
                 this.read_count.store(reader.read()?, Ordering::Relaxed);
                 Ok(0)
             }
-            _ => Err(Error::EINVAL),
+            _ => Err(EINVAL),
         }
     }
 }

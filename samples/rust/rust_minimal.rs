@@ -1,9 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0
 
-//! Rust minimal sample
-
-#![no_std]
-#![feature(allocator_api, global_asm)]
+//! Rust minimal sample.
 
 use kernel::prelude::*;
 
@@ -12,15 +9,15 @@ module! {
     name: b"rust_minimal",
     author: b"Rust for Linux Contributors",
     description: b"Rust minimal sample",
-    license: b"GPL v2",
+    license: b"GPL",
 }
 
 struct RustMinimal {
     message: String,
 }
 
-impl KernelModule for RustMinimal {
-    fn init() -> Result<Self> {
+impl kernel::Module for RustMinimal {
+    fn init(_name: &'static CStr, _module: &'static ThisModule) -> Result<Self> {
         pr_info!("Rust minimal sample (init)\n");
         pr_info!("Am I built-in? {}\n", !cfg!(MODULE));
 

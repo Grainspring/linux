@@ -163,7 +163,7 @@ where
 /// let readonly = [1, 2];
 /// let borrowed = Items::new((&readonly[..]).into());
 /// match borrowed {
-///     Items { values: Cow::Borrowed(b) } => println!("borrowed {:?}", b),
+///     Items { values: Cow::Borrowed(b) } => println!("borrowed {b:?}"),
 ///     _ => panic!("expect borrowed value"),
 /// }
 ///
@@ -172,13 +172,14 @@ where
 /// clone_on_write.values.to_mut().push(3);
 /// println!("clone_on_write = {:?}", clone_on_write.values);
 ///
-/// // The data was mutated. Let check it out.
+/// // The data was mutated. Let's check it out.
 /// match clone_on_write {
 ///     Items { values: Cow::Owned(_) } => println!("clone_on_write contains owned data"),
 ///     _ => panic!("expect owned data"),
 /// }
 /// ```
 #[stable(feature = "rust1", since = "1.0.0")]
+#[cfg_attr(not(test), rustc_diagnostic_item = "Cow")]
 pub enum Cow<'a, B: ?Sized + 'a>
 where
     B: ToOwned,
@@ -331,7 +332,12 @@ impl<B: ?Sized + ToOwned> Cow<'_, B> {
 }
 
 #[stable(feature = "rust1", since = "1.0.0")]
-impl<B: ?Sized + ToOwned> Deref for Cow<'_, B> {
+#[rustc_const_unstable(feature = "const_deref", issue = "88955")]
+#[cfg_attr(not(bootstrap), allow(drop_bounds))] // FIXME remove `~const Drop` and this attr when bumping
+impl<B: ?Sized + ToOwned> const Deref for Cow<'_, B>
+where
+    B::Owned: ~const Borrow<B>,
+{
     type Target = B;
 
     fn deref(&self) -> &B {

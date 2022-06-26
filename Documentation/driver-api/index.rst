@@ -85,7 +85,6 @@ available subsections can be seen below.
    io-mapping
    io_ordering
    generic-counter
-   lightnvm-pblk
    memory-devices/index
    men-chameleon-bus
    ntb
@@ -102,8 +101,10 @@ available subsections can be seen below.
    surface_aggregator/index
    switchtec
    sync_file
+   tty/index
    vfio-mediated-device
    vfio
+   vfio-pci-device-specific-driver-acceptance
    xilinx/index
    xillybus
    zorro

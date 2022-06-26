@@ -21,16 +21,8 @@ LDFLAGS_vmlinux		+= -shared -Bsymbolic -z notext \
 endif
 
 ifeq ($(CONFIG_ARM64_ERRATUM_843419),y)
-  ifneq ($(CONFIG_ARM64_LD_HAS_FIX_ERRATUM_843419),y)
-$(warning ld does not support --fix-cortex-a53-843419; kernel may be susceptible to erratum)
-  else
+  ifeq ($(CONFIG_ARM64_LD_HAS_FIX_ERRATUM_843419),y)
 LDFLAGS_vmlinux	+= --fix-cortex-a53-843419
-  endif
-endif
-
-ifeq ($(CONFIG_ARM64_USE_LSE_ATOMICS), y)
-  ifneq ($(CONFIG_ARM64_LSE_ATOMICS), y)
-$(warning LSE atomics not supported by binutils)
   endif
 endif
 
@@ -64,6 +56,11 @@ stack_protector_prepare: prepare0
 				-mstack-protector-guard-offset=$(shell	  \
 			awk '{if ($$2 == "TSK_STACK_CANARY") print $$3;}' \
 					include/generated/asm-offsets.h))
+endif
+
+ifeq ($(CONFIG_AS_HAS_ARMV8_2), y)
+# make sure to pass the newest target architecture to -march.
+asm-arch := armv8.2-a
 endif
 
 # Ensure that if the compiler supports branch protection we default it
@@ -165,8 +162,9 @@ Image: vmlinux
 Image.%: Image
 	$(Q)$(MAKE) $(build)=$(boot) $(boot)/$@
 
-zinstall install:
-	$(Q)$(MAKE) $(build)=$(boot) $@
+install: KBUILD_IMAGE := $(boot)/Image
+install zinstall:
+	$(call cmd,install)
 
 PHONY += vdso_install
 vdso_install:
@@ -176,10 +174,16 @@ vdso_install:
 
 archprepare:
 	$(Q)$(MAKE) $(build)=arch/arm64/tools kapi
-
-# We use MRPROPER_FILES and CLEAN_FILES now
-archclean:
-	$(Q)$(MAKE) $(clean)=$(boot)
+ifeq ($(CONFIG_ARM64_ERRATUM_843419),y)
+  ifneq ($(CONFIG_ARM64_LD_HAS_FIX_ERRATUM_843419),y)
+	@echo "warning: ld does not support --fix-cortex-a53-843419; kernel may be susceptible to erratum" >&2
+  endif
+endif
+ifeq ($(CONFIG_ARM64_USE_LSE_ATOMICS),y)
+  ifneq ($(CONFIG_ARM64_LSE_ATOMICS),y)
+	@echo "warning: LSE atomics not supported by binutils" >&2
+  endif
+endif
 
 ifeq ($(KBUILD_EXTMOD),)
 # We need to generate vdso-offsets.h before compiling certain files in kernel/.

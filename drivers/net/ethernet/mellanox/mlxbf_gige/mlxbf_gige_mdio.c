@@ -105,7 +105,8 @@ static int mlxbf_gige_mdio_read(struct mii_bus *bus, int phy_add, int phy_reg)
 	writel(cmd, priv->mdio_io + MLXBF_GIGE_MDIO_GW_OFFSET);
 
 	ret = readl_poll_timeout_atomic(priv->mdio_io + MLXBF_GIGE_MDIO_GW_OFFSET,
-					val, !(val & MLXBF_GIGE_MDIO_GW_BUSY_MASK), 100, 1000000);
+					val, !(val & MLXBF_GIGE_MDIO_GW_BUSY_MASK),
+					5, 1000000);
 
 	if (ret) {
 		writel(0, priv->mdio_io + MLXBF_GIGE_MDIO_GW_OFFSET);
@@ -137,7 +138,8 @@ static int mlxbf_gige_mdio_write(struct mii_bus *bus, int phy_add,
 
 	/* If the poll timed out, drop the request */
 	ret = readl_poll_timeout_atomic(priv->mdio_io + MLXBF_GIGE_MDIO_GW_OFFSET,
-					temp, !(temp & MLXBF_GIGE_MDIO_GW_BUSY_MASK), 100, 1000000);
+					temp, !(temp & MLXBF_GIGE_MDIO_GW_BUSY_MASK),
+					5, 1000000);
 
 	return ret;
 }
@@ -145,14 +147,9 @@ static int mlxbf_gige_mdio_write(struct mii_bus *bus, int phy_add,
 int mlxbf_gige_mdio_probe(struct platform_device *pdev, struct mlxbf_gige *priv)
 {
 	struct device *dev = &pdev->dev;
-	struct resource *res;
 	int ret;
 
-	res = platform_get_resource(pdev, IORESOURCE_MEM, MLXBF_GIGE_RES_MDIO9);
-	if (!res)
-		return -ENODEV;
-
-	priv->mdio_io = devm_ioremap_resource(dev, res);
+	priv->mdio_io = devm_platform_ioremap_resource(pdev, MLXBF_GIGE_RES_MDIO9);
 	if (IS_ERR(priv->mdio_io))
 		return PTR_ERR(priv->mdio_io);
 

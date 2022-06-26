@@ -7,26 +7,28 @@
 //! Reference: <https://www.kernel.org/doc/Documentation/sysctl/README>
 
 use alloc::boxed::Box;
-use alloc::vec;
+use alloc::vec::Vec;
 use core::mem;
 use core::ptr;
 use core::sync::atomic;
 
 use crate::{
-    bindings, c_types, error,
+    bindings, c_types,
+    error::code::*,
     io_buffer::IoBufferWriter,
     str::CStr,
     types,
     user_ptr::{UserSlicePtr, UserSlicePtrWriter},
+    Result,
 };
 
 /// Sysctl storage.
 pub trait SysctlStorage: Sync {
     /// Writes a byte slice.
-    fn store_value(&self, data: &[u8]) -> (usize, error::Result);
+    fn store_value(&self, data: &[u8]) -> (usize, Result);
 
     /// Reads via a [`UserSlicePtrWriter`].
-    fn read_value(&self, data: &mut UserSlicePtrWriter) -> (usize, error::Result);
+    fn read_value(&self, data: &mut UserSlicePtrWriter) -> (usize, Result);
 }
 
 fn trim_whitespace(mut data: &[u8]) -> &[u8] {
@@ -47,17 +49,17 @@ impl<T> SysctlStorage for &T
 where
     T: SysctlStorage,
 {
-    fn store_value(&self, data: &[u8]) -> (usize, error::Result) {
+    fn store_value(&self, data: &[u8]) -> (usize, Result) {
         (*self).store_value(data)
     }
 
-    fn read_value(&self, data: &mut UserSlicePtrWriter) -> (usize, error::Result) {
+    fn read_value(&self, data: &mut UserSlicePtrWriter) -> (usize, Result) {
         (*self).read_value(data)
     }
 }
 
 impl SysctlStorage for atomic::AtomicBool {
-    fn store_value(&self, data: &[u8]) -> (usize, error::Result) {
+    fn store_value(&self, data: &[u8]) -> (usize, Result) {
         let result = match trim_whitespace(data) {
             b"0" => {
                 self.store(false, atomic::Ordering::Relaxed);
@@ -67,12 +69,12 @@ impl SysctlStorage for atomic::AtomicBool {
                 self.store(true, atomic::Ordering::Relaxed);
                 Ok(())
             }
-            _ => Err(error::Error::EINVAL),
+            _ => Err(EINVAL),
         };
         (data.len(), result)
     }
 
-    fn read_value(&self, data: &mut UserSlicePtrWriter) -> (usize, error::Result) {
+    fn read_value(&self, data: &mut UserSlicePtrWriter) -> (usize, Result) {
         let value = if self.load(atomic::Ordering::Relaxed) {
             b"1\n"
         } else {
@@ -135,32 +137,31 @@ impl<T: SysctlStorage> Sysctl<T> {
         name: &'static CStr,
         storage: T,
         mode: types::Mode,
-    ) -> error::Result<Sysctl<T>> {
+    ) -> Result<Sysctl<T>> {
         if name.contains(&b'/') {
-            return Err(error::Error::EINVAL);
+            return Err(EINVAL);
         }
 
         let storage = Box::try_new(storage)?;
-        let mut table = vec![
-            bindings::ctl_table {
-                procname: name.as_char_ptr(),
-                mode: mode.as_int(),
-                data: &*storage as *const T as *mut c_types::c_void,
-                proc_handler: Some(proc_handler::<T>),
+        let mut table = Vec::try_with_capacity(2)?;
+        table.try_push(bindings::ctl_table {
+            procname: name.as_char_ptr(),
+            mode: mode.as_int(),
+            data: &*storage as *const T as *mut c_types::c_void,
+            proc_handler: Some(proc_handler::<T>),
 
-                maxlen: 0,
-                child: ptr::null_mut(),
-                poll: ptr::null_mut(),
-                extra1: ptr::null_mut(),
-                extra2: ptr::null_mut(),
-            },
-            unsafe { mem::zeroed() },
-        ]
-        .try_into_boxed_slice()?;
+            maxlen: 0,
+            child: ptr::null_mut(),
+            poll: ptr::null_mut(),
+            extra1: ptr::null_mut(),
+            extra2: ptr::null_mut(),
+        })?;
+        table.try_push(unsafe { mem::zeroed() })?;
+        let mut table = table.try_into_boxed_slice()?;
 
         let result = unsafe { bindings::register_sysctl(path.as_char_ptr(), table.as_mut_ptr()) };
         if result.is_null() {
-            return Err(error::Error::ENOMEM);
+            return Err(ENOMEM);
         }
 
         Ok(Sysctl {

@@ -1,6 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 /*
- *   fs/cifs_debug.c
  *
  *   Copyright (C) International Business Machines  Corp., 2000,2005
  *
@@ -95,7 +94,7 @@ static void cifs_debug_tcon(struct seq_file *m, struct cifs_tcon *tcon)
 		   le32_to_cpu(tcon->fsDevInfo.DeviceCharacteristics),
 		   le32_to_cpu(tcon->fsAttrInfo.Attributes),
 		   le32_to_cpu(tcon->fsAttrInfo.MaxPathNameComponentLength),
-		   tcon->tidStatus);
+		   tcon->status);
 	if (dev_type == FILE_DEVICE_DISK)
 		seq_puts(m, " type: DISK ");
 	else if (dev_type == FILE_DEVICE_CD_ROM)
@@ -117,7 +116,8 @@ static void cifs_debug_tcon(struct seq_file *m, struct cifs_tcon *tcon)
 		tcon->ses->server->ops->dump_share_caps(m, tcon);
 	if (tcon->use_witness)
 		seq_puts(m, " Witness");
-
+	if (tcon->broken_sparse_sup)
+		seq_puts(m, " nosparse");
 	if (tcon->need_reconnect)
 		seq_puts(m, "\tDISCONNECTED ");
 	seq_putc(m, '\n');
@@ -250,9 +250,6 @@ static int cifs_debug_data_proc_show(struct seq_file *m, void *v)
 #ifdef CONFIG_CIFS_ALLOW_INSECURE_LEGACY
 	seq_printf(m, ",ALLOW_INSECURE_LEGACY");
 #endif
-#ifdef CONFIG_CIFS_WEAK_PW_HASH
-	seq_printf(m, ",WEAK_PW_HASH");
-#endif
 #ifdef CONFIG_CIFS_POSIX
 	seq_printf(m, ",CIFS_POSIX");
 #endif
@@ -275,7 +272,8 @@ static int cifs_debug_data_proc_show(struct seq_file *m, void *v)
 	c = 0;
 	spin_lock(&cifs_tcp_ses_lock);
 	list_for_each_entry(server, &cifs_tcp_ses_list, tcp_ses_list) {
-		if (server->is_channel)
+		/* channel info will be printed as a part of sessions below */
+		if (CIFS_SERVER_IS_CHAN(server))
 			continue;
 
 		c++;
@@ -362,6 +360,8 @@ skip_rdma:
 			seq_printf(m, " signed");
 		if (server->posix_ext_supported)
 			seq_printf(m, " posix");
+		if (server->nosharesock)
+			seq_printf(m, " nosharesock");
 
 		if (server->rdma)
 			seq_printf(m, "\nRDMA ");
@@ -387,7 +387,7 @@ skip_rdma:
 				(ses->serverNOS == NULL)) {
 				seq_printf(m, "\n\t%d) Address: %s Uses: %d Capability: 0x%x\tSession Status: %d ",
 					i, ses->ip_addr, ses->ses_count,
-					ses->capabilities, ses->status);
+					ses->capabilities, ses->ses_status);
 				if (ses->session_flags & SMB2_SESSION_FLAG_IS_GUEST)
 					seq_printf(m, "Guest ");
 				else if (ses->session_flags & SMB2_SESSION_FLAG_IS_NULL)
@@ -399,7 +399,7 @@ skip_rdma:
 					"\n\tSMB session status: %d ",
 				i, ses->ip_addr, ses->serverDomain,
 				ses->ses_count, ses->serverOS, ses->serverNOS,
-				ses->capabilities, ses->status);
+				ses->capabilities, ses->ses_status);
 			}
 
 			seq_printf(m, "\n\tSecurity type: %s ",
@@ -416,12 +416,24 @@ skip_rdma:
 				   from_kuid(&init_user_ns, ses->linux_uid),
 				   from_kuid(&init_user_ns, ses->cred_uid));
 
+			spin_lock(&ses->chan_lock);
+			if (CIFS_CHAN_NEEDS_RECONNECT(ses, 0))
+				seq_puts(m, "\tPrimary channel: DISCONNECTED ");
+			if (CIFS_CHAN_IN_RECONNECT(ses, 0))
+				seq_puts(m, "\t[RECONNECTING] ");
+
 			if (ses->chan_count > 1) {
 				seq_printf(m, "\n\n\tExtra Channels: %zu ",
 					   ses->chan_count-1);
-				for (j = 1; j < ses->chan_count; j++)
+				for (j = 1; j < ses->chan_count; j++) {
 					cifs_dump_channel(m, j, &ses->chans[j]);
+					if (CIFS_CHAN_NEEDS_RECONNECT(ses, j))
+						seq_puts(m, "\tDISCONNECTED ");
+					if (CIFS_CHAN_IN_RECONNECT(ses, j))
+						seq_puts(m, "\t[RECONNECTING] ");
+				}
 			}
+			spin_unlock(&ses->chan_lock);
 
 			seq_puts(m, "\n\n\tShares: ");
 			j = 0;
@@ -929,14 +941,6 @@ cifs_security_flags_handle_must_flags(unsigned int *flags)
 		*flags = CIFSSEC_MUST_NTLMSSP;
 	else if ((*flags & CIFSSEC_MUST_NTLMV2) == CIFSSEC_MUST_NTLMV2)
 		*flags = CIFSSEC_MUST_NTLMV2;
-	else if ((*flags & CIFSSEC_MUST_NTLM) == CIFSSEC_MUST_NTLM)
-		*flags = CIFSSEC_MUST_NTLM;
-	else if (CIFSSEC_MUST_LANMAN &&
-		 (*flags & CIFSSEC_MUST_LANMAN) == CIFSSEC_MUST_LANMAN)
-		*flags = CIFSSEC_MUST_LANMAN;
-	else if (CIFSSEC_MUST_PLNTXT &&
-		 (*flags & CIFSSEC_MUST_PLNTXT) == CIFSSEC_MUST_PLNTXT)
-		*flags = CIFSSEC_MUST_PLNTXT;
 
 	*flags |= signflags;
 }

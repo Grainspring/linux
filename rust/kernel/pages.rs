@@ -5,24 +5,10 @@
 //! TODO: This module is a work in progress.
 
 use crate::{
-    bindings, c_types, io_buffer::IoBufferReader, user_ptr::UserSlicePtrReader, Error, Result,
-    PAGE_SIZE,
+    bindings, c_types, error::code::*, io_buffer::IoBufferReader, user_ptr::UserSlicePtrReader,
+    Result, PAGE_SIZE,
 };
 use core::{marker::PhantomData, ptr};
-
-extern "C" {
-    #[allow(improper_ctypes)]
-    fn rust_helper_alloc_pages(
-        gfp_mask: bindings::gfp_t,
-        order: c_types::c_uint,
-    ) -> *mut bindings::page;
-
-    #[allow(improper_ctypes)]
-    fn rust_helper_kmap(page: *mut bindings::page) -> *mut c_types::c_void;
-
-    #[allow(improper_ctypes)]
-    fn rust_helper_kunmap(page: *mut bindings::page);
-}
 
 /// A set of physical pages.
 ///
@@ -33,7 +19,7 @@ extern "C" {
 ///
 /// The pointer `Pages::pages` is valid and points to 2^ORDER pages.
 pub struct Pages<const ORDER: u32> {
-    pages: *mut bindings::page,
+    pub(crate) pages: *mut bindings::page,
 }
 
 impl<const ORDER: u32> Pages<ORDER> {
@@ -42,34 +28,16 @@ impl<const ORDER: u32> Pages<ORDER> {
         // TODO: Consider whether we want to allow callers to specify flags.
         // SAFETY: This only allocates pages. We check that it succeeds in the next statement.
         let pages = unsafe {
-            rust_helper_alloc_pages(
+            bindings::alloc_pages(
                 bindings::GFP_KERNEL | bindings::__GFP_ZERO | bindings::__GFP_HIGHMEM,
                 ORDER,
             )
         };
         if pages.is_null() {
-            return Err(Error::ENOMEM);
+            return Err(ENOMEM);
         }
         // INVARIANTS: We checked that the allocation above succeeded>
         Ok(Self { pages })
-    }
-
-    /// Maps a single page at the given address in the given VM area.
-    ///
-    /// This is only meant to be used by pages of order 0.
-    pub fn insert_page(&self, vma: &mut bindings::vm_area_struct, address: usize) -> Result {
-        if ORDER != 0 {
-            return Err(Error::EINVAL);
-        }
-
-        // SAFETY: We check above that the allocation is of order 0. The range of `address` is
-        // already checked by `vm_insert_page`.
-        let ret = unsafe { bindings::vm_insert_page(vma, address as _, self.pages) };
-        if ret != 0 {
-            Err(Error::from_kernel_errno(ret))
-        } else {
-            Ok(())
-        }
     }
 
     /// Copies data from the given [`UserSlicePtrReader`] into the pages.
@@ -80,12 +48,12 @@ impl<const ORDER: u32> Pages<ORDER> {
         len: usize,
     ) -> Result {
         // TODO: For now this only works on the first page.
-        let end = offset.checked_add(len).ok_or(Error::EINVAL)?;
+        let end = offset.checked_add(len).ok_or(EINVAL)?;
         if end > PAGE_SIZE {
-            return Err(Error::EINVAL);
+            return Err(EINVAL);
         }
 
-        let mapping = self.kmap(0).ok_or(Error::EINVAL)?;
+        let mapping = self.kmap(0).ok_or(EINVAL)?;
 
         // SAFETY: We ensured that the buffer was valid with the check above.
         unsafe { reader.read_raw((mapping.ptr as usize + offset) as _, len) }?;
@@ -101,17 +69,17 @@ impl<const ORDER: u32> Pages<ORDER> {
     /// can be safely cast; [`crate::io_buffer::ReadableFromBytes`] has more details about it.
     pub unsafe fn read(&self, dest: *mut u8, offset: usize, len: usize) -> Result {
         // TODO: For now this only works on the first page.
-        let end = offset.checked_add(len).ok_or(Error::EINVAL)?;
+        let end = offset.checked_add(len).ok_or(EINVAL)?;
         if end > PAGE_SIZE {
-            return Err(Error::EINVAL);
+            return Err(EINVAL);
         }
 
-        let mapping = self.kmap(0).ok_or(Error::EINVAL)?;
+        let mapping = self.kmap(0).ok_or(EINVAL)?;
         unsafe { ptr::copy((mapping.ptr as *mut u8).add(offset), dest, len) };
         Ok(())
     }
 
-    /// Maps the pages and writes into them from the given bufer.
+    /// Maps the pages and writes into them from the given buffer.
     ///
     /// # Safety
     ///
@@ -121,12 +89,12 @@ impl<const ORDER: u32> Pages<ORDER> {
     /// more details about it.
     pub unsafe fn write(&self, src: *const u8, offset: usize, len: usize) -> Result {
         // TODO: For now this only works on the first page.
-        let end = offset.checked_add(len).ok_or(Error::EINVAL)?;
+        let end = offset.checked_add(len).ok_or(EINVAL)?;
         if end > PAGE_SIZE {
-            return Err(Error::EINVAL);
+            return Err(EINVAL);
         }
 
-        let mapping = self.kmap(0).ok_or(Error::EINVAL)?;
+        let mapping = self.kmap(0).ok_or(EINVAL)?;
         unsafe { ptr::copy(src, (mapping.ptr as *mut u8).add(offset), len) };
         Ok(())
     }
@@ -141,7 +109,7 @@ impl<const ORDER: u32> Pages<ORDER> {
         let page = unsafe { self.pages.add(index) };
 
         // SAFETY: `page` is valid based on the checks above.
-        let ptr = unsafe { rust_helper_kmap(page) };
+        let ptr = unsafe { bindings::kmap(page) };
         if ptr.is_null() {
             return None;
         }
@@ -171,6 +139,6 @@ impl Drop for PageMapping<'_> {
     fn drop(&mut self) {
         // SAFETY: An instance of `PageMapping` is created only when `kmap` succeeded for the given
         // page, so it is safe to unmap it here.
-        unsafe { rust_helper_kunmap(self.page) };
+        unsafe { bindings::kunmap(self.page) };
     }
 }

@@ -6,55 +6,24 @@
 //!
 //! Reference: <https://www.kernel.org/doc/html/latest/core-api/printk-basics.html>
 
-use core::cmp;
 use core::fmt;
 
+use crate::{
+    c_types::{c_char, c_void},
+    str::RawFormatter,
+};
+
+#[cfg(CONFIG_PRINTK)]
 use crate::bindings;
-use crate::c_types::{c_char, c_void};
 
 // Called from `vsprintf` with format specifier `%pA`.
 #[no_mangle]
 unsafe fn rust_fmt_argument(buf: *mut c_char, end: *mut c_char, ptr: *const c_void) -> *mut c_char {
     use fmt::Write;
-
-    // Use `usize` to use `saturating_*` functions.
-    struct Writer {
-        buf: usize,
-        end: usize,
-    }
-
-    impl Write for Writer {
-        fn write_str(&mut self, s: &str) -> fmt::Result {
-            // `buf` value after writing `len` bytes. This does not have to be bounded
-            // by `end`, but we don't want it to wrap around to 0.
-            let buf_new = self.buf.saturating_add(s.len());
-
-            // Amount that we can copy. `saturating_sub` ensures we get 0 if
-            // `buf` goes past `end`.
-            let len_to_copy = cmp::min(buf_new, self.end).saturating_sub(self.buf);
-
-            // SAFETY: In any case, `buf` is non-null and properly aligned.
-            // If `len_to_copy` is non-zero, then we know `buf` has not past
-            // `end` yet and so is valid.
-            unsafe {
-                core::ptr::copy_nonoverlapping(
-                    s.as_bytes().as_ptr(),
-                    self.buf as *mut u8,
-                    len_to_copy,
-                )
-            };
-
-            self.buf = buf_new;
-            Ok(())
-        }
-    }
-
-    let mut w = Writer {
-        buf: buf as _,
-        end: end as _,
-    };
+    // SAFETY: The C contract guarantees that `buf` is valid if it's less than `end`.
+    let mut w = unsafe { RawFormatter::from_ptrs(buf.cast(), end.cast()) };
     let _ = w.write_fmt(unsafe { *(ptr as *const fmt::Arguments<'_>) });
-    w.buf as _
+    w.pos().cast()
 }
 
 /// Format strings.
@@ -70,12 +39,12 @@ pub mod format_strings {
     /// The length of the fixed format strings.
     pub const LENGTH: usize = 10;
 
-    /// Generates a fixed format string for the kernel's [`printk`].
+    /// Generates a fixed format string for the kernel's [`_printk`].
     ///
     /// The format string is always the same for a given level, i.e. for a
     /// given `prefix`, which are the kernel's `KERN_*` constants.
     ///
-    /// [`printk`]: ../../../../include/linux/printk.h
+    /// [`_printk`]: ../../../../include/linux/printk.h
     const fn generate(is_cont: bool, prefix: &[u8; 3]) -> [u8; LENGTH] {
         // Ensure the `KERN_*` macros are what we expect.
         assert!(prefix[0] == b'\x01');
@@ -115,7 +84,7 @@ pub mod format_strings {
     pub static CONT: [u8; LENGTH] = generate(true, bindings::KERN_CONT);
 }
 
-/// Prints a message via the kernel's [`printk`].
+/// Prints a message via the kernel's [`_printk`].
 ///
 /// Public but hidden since it should only be used from public macros.
 ///
@@ -124,16 +93,18 @@ pub mod format_strings {
 /// The format string must be one of the ones in [`format_strings`], and
 /// the module name must be null-terminated.
 ///
-/// [`printk`]: ../../../../include/linux/printk.h
+/// [`_printk`]: ../../../../include/linux/_printk.h
 #[doc(hidden)]
+#[cfg_attr(not(CONFIG_PRINTK), allow(unused_variables))]
 pub unsafe fn call_printk(
     format_string: &[u8; format_strings::LENGTH],
     module_name: &[u8],
     args: fmt::Arguments<'_>,
 ) {
-    // `printk` does not seem to fail in any path.
+    // `_printk` does not seem to fail in any path.
+    #[cfg(CONFIG_PRINTK)]
     unsafe {
-        bindings::printk(
+        bindings::_printk(
             format_string.as_ptr() as _,
             module_name.as_ptr(),
             &args as *const _ as *const c_void,
@@ -141,18 +112,20 @@ pub unsafe fn call_printk(
     }
 }
 
-/// Prints a message via the kernel's [`printk`] for the `CONT` level.
+/// Prints a message via the kernel's [`_printk`] for the `CONT` level.
 ///
 /// Public but hidden since it should only be used from public macros.
 ///
-/// [`printk`]: ../../../../include/linux/printk.h
+/// [`_printk`]: ../../../../include/linux/printk.h
 #[doc(hidden)]
+#[cfg_attr(not(CONFIG_PRINTK), allow(unused_variables))]
 pub fn call_printk_cont(args: fmt::Arguments<'_>) {
-    // `printk` does not seem to fail in any path.
+    // `_printk` does not seem to fail in any path.
     //
     // SAFETY: The format string is fixed.
+    #[cfg(CONFIG_PRINTK)]
     unsafe {
-        bindings::printk(
+        bindings::_printk(
             format_strings::CONT.as_ptr() as _,
             &args as *const _ as *const c_void,
         );
@@ -223,7 +196,6 @@ macro_rules! print_macro (
 /// # Examples
 ///
 /// ```
-/// # use kernel::prelude::*;
 /// pr_emerg!("hello {}\n", "there");
 /// ```
 #[macro_export]
@@ -248,7 +220,6 @@ macro_rules! pr_emerg (
 /// # Examples
 ///
 /// ```
-/// # use kernel::prelude::*;
 /// pr_alert!("hello {}\n", "there");
 /// ```
 #[macro_export]
@@ -273,7 +244,6 @@ macro_rules! pr_alert (
 /// # Examples
 ///
 /// ```
-/// # use kernel::prelude::*;
 /// pr_crit!("hello {}\n", "there");
 /// ```
 #[macro_export]
@@ -298,7 +268,6 @@ macro_rules! pr_crit (
 /// # Examples
 ///
 /// ```
-/// # use kernel::prelude::*;
 /// pr_err!("hello {}\n", "there");
 /// ```
 #[macro_export]
@@ -323,7 +292,6 @@ macro_rules! pr_err (
 /// # Examples
 ///
 /// ```
-/// # use kernel::prelude::*;
 /// pr_warn!("hello {}\n", "there");
 /// ```
 #[macro_export]
@@ -348,7 +316,6 @@ macro_rules! pr_warn (
 /// # Examples
 ///
 /// ```
-/// # use kernel::prelude::*;
 /// pr_notice!("hello {}\n", "there");
 /// ```
 #[macro_export]
@@ -373,7 +340,6 @@ macro_rules! pr_notice (
 /// # Examples
 ///
 /// ```
-/// # use kernel::prelude::*;
 /// pr_info!("hello {}\n", "there");
 /// ```
 #[macro_export]
@@ -400,7 +366,6 @@ macro_rules! pr_info (
 /// # Examples
 ///
 /// ```
-/// # use kernel::prelude::*;
 /// pr_debug!("hello {}\n", "there");
 /// ```
 #[macro_export]
@@ -428,7 +393,6 @@ macro_rules! pr_debug (
 /// # Examples
 ///
 /// ```
-/// # use kernel::prelude::*;
 /// # use kernel::pr_cont;
 /// pr_info!("hello");
 /// pr_cont!(" {}\n", "there");

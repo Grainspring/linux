@@ -1,11 +1,13 @@
 on:
   pull_request: {}
+  schedule:
+    - cron: '30 5,17 * * *'
   push:
-    branches: [rust]
 
 jobs:
   ci:
     runs-on: ubuntu-20.04
+    container: ghcr.io/rust-for-linux/ci:Rust-1.61.0
     timeout-minutes: 20
 
     strategy:
@@ -13,15 +15,24 @@ jobs:
         arch: [arm, arm64, ppc64le, riscv64, x86_64]
         toolchain: [gcc, clang, llvm]
         config: [debug, release]
-        rustc: [2021-06-23]
         output: [src] # [src, build]
-        install: [rustup] # [rustup, standalone]
         sysroot: [common] # [common, custom]
+        lto: [none] # [none, thin]
 
         exclude:
           # arm 32-bit gcc not yet supported
           - arch: arm
             toolchain: gcc
+          # arm (clang/LLVM,release) issue since Rust 1.56
+          - arch: arm
+            toolchain: clang
+            config: release
+          - arch: arm
+            toolchain: llvm
+            config: release
+          # riscv64 debug (see #500 and #502).
+          - arch: riscv64
+            config: debug
           # Exclude `LLVM=1` where not supported.
           - arch: ppc64le
             toolchain: llvm
@@ -30,33 +41,57 @@ jobs:
 
         # A few independent combinations to avoid exploding the matrix:
         #   - The other option for `output`.
-        #   - Different releases for `rustc`.
-        #   - The other three (`install`, `sysroot`) combinations
-        #     (they are interrelated, so the cross-product needs to be tested)
+        #   - Whether to use a custom sysroot.
+        #   - Explicitly enabling `lto` on platforms which support LTO.
         include:
           - arch: arm64
             toolchain: gcc
             config: debug
-            rustc: 2021-06-23
             output: build
-            install: rustup
             sysroot: custom
+            lto: none
+
+          - arch: arm64
+            toolchain: llvm
+            config: debug
+            output: build
+            sysroot: custom
+            lto: thin
+
+          - arch: arm64
+            toolchain: llvm
+            config: release
+            output: build
+            sysroot: custom
+            lto: thin
 
           - arch: ppc64le
             toolchain: clang
             config: release
-            rustc: 2021-06-23
             output: build
-            install: standalone
             sysroot: common
+            lto: none
 
           - arch: x86_64
             toolchain: llvm
             config: debug
-            rustc: 2021-06-23
             output: build
-            install: standalone
             sysroot: custom
+            lto: none
+
+          - arch: x86_64
+            toolchain: llvm
+            config: debug
+            output: src
+            sysroot: common
+            lto: thin
+
+          - arch: x86_64
+            toolchain: llvm
+            config: release
+            output: src
+            sysroot: common
+            lto: thin
 
     steps:
       # Setup: checkout
@@ -68,10 +103,10 @@ jobs:
       # Setup: Github cache
       - uses: actions/cache@v2
         with:
-          path: ~/.ccache
-          key: ${{ env.MATRIX_NAME  }}-ccache-${{ github.run_id }}
+          path: /root/.ccache
+          key: ${{ env.MATRIX_NAME }}-ccache-${{ github.run_id }}
           restore-keys: |
-              ${{ env.MATRIX_NAME  }}-ccache-
+              ${{ env.MATRIX_NAME }}-ccache-
 
       # Setup: variables
       - if: matrix.arch == 'x86_64'
@@ -93,6 +128,7 @@ jobs:
         run: |
           echo 'MAKE_ARCH=ARCH=powerpc' >> $GITHUB_ENV
           echo 'MAKE_CROSS_COMPILE=CROSS_COMPILE=powerpc64le-linux-gnu-' >> $GITHUB_ENV
+          echo 'MAKE_LLVM_IAS=LLVM_IAS=0' >> $GITHUB_ENV
           echo 'IMAGE_PATH=vmlinux' >> $GITHUB_ENV
           echo 'QEMU_ARCH=ppc64' >> $GITHUB_ENV
           echo 'QEMU_MACHINE=pseries' >> $GITHUB_ENV
@@ -116,77 +152,37 @@ jobs:
           echo 'QEMU_ARGS=-bios /usr/lib/riscv64-linux-gnu/opensbi/generic/fw_jump.elf' >> $GITHUB_ENV
 
       - if: matrix.toolchain == 'clang'
-        run: echo 'MAKE_TOOLCHAIN=CC=clang-12' >> $GITHUB_ENV
+        run: echo 'MAKE_TOOLCHAIN=CC=clang' >> $GITHUB_ENV
       - if: matrix.toolchain == 'llvm'
         run: echo 'MAKE_TOOLCHAIN=LLVM=1' >> $GITHUB_ENV
+
+      # if arch is supported and ThinLTO is enabled, enable LLVM's integrated assembler
+      - if: matrix.arch == 'arm64' && matrix.toolchain == 'llvm' && matrix.lto == 'thin'
+        run: echo 'MAKE_LLVM_IAS=LLVM_IAS=1' >> $GITHUB_ENV
+      - if: matrix.arch == 'x86_64' && matrix.toolchain == 'llvm' && matrix.lto == 'thin'
+        run: echo 'MAKE_LLVM_IAS=LLVM_IAS=1' >> $GITHUB_ENV
 
       - if: matrix.output == 'build'
         run: |
           echo 'MAKE_OUTPUT=O=build' >> $GITHUB_ENV
           echo 'BUILD_DIR=build/' >> $GITHUB_ENV
 
+      # Setup: Rust
+      #
+      # `rustc` via `rustup` needs to find the `settings.xml` file,
+      # but GitHub overrides `$HOME` for containers. Undo it, even
+      # if it makes GitHub show some Docker warnings.
+      # See https://github.com/actions/runner/issues/863.
+      #
+      # Note that the commands need to be in their own `run` to have
+      # `$HOME` visible for the second one.
+      - run: echo 'HOME=/root' >> $GITHUB_ENV
+      - run: echo "$HOME/.cargo/bin" >> $GITHUB_PATH
+
       - if: matrix.sysroot == 'custom'
         run: |
           echo 'RUSTC_SYSROOT=--sysroot=$HOME/sysroot' >> $GITHUB_ENV
           echo "MAKE_SYSROOT=KRUSTFLAGS=--sysroot=$HOME/sysroot" >> $GITHUB_ENV
-
-      # Setup: custom pre-built binaries folder
-      - run: |
-          mkdir bin
-          echo $(pwd)/bin >> $GITHUB_PATH
-
-      # Setup: LLVM
-      - run: curl https://apt.llvm.org/llvm-snapshot.gpg.key | sudo apt-key add -
-      # Retry to be resilient to intermittent network issues
-      - run: |
-          sudo add-apt-repository 'deb http://apt.llvm.org/focal/ llvm-toolchain-focal-12 main' ||
-            sudo add-apt-repository 'deb http://apt.llvm.org/focal/ llvm-toolchain-focal-12 main' ||
-            sudo add-apt-repository 'deb http://apt.llvm.org/focal/ llvm-toolchain-focal-12 main'
-      - run: sudo apt-get update -y
-      - run: sudo apt-get install -y llvm-12 clang-12 lld-12
-      - run: echo $(llvm-config-12 --bindir) >> $GITHUB_PATH
-
-      # Setup: GCC
-      - if: matrix.arch == 'arm'
-        run: sudo apt-get install -y gcc-arm-linux-gnueabi lzop
-      - if: matrix.arch == 'arm64'
-        run: sudo apt-get install -y gcc-aarch64-linux-gnu
-      - if: matrix.arch == 'ppc64le'
-        run: sudo apt-get install -y gcc-powerpc64le-linux-gnu
-      - if: matrix.arch == 'riscv64'
-        run: sudo apt-get install -y gcc-riscv64-linux-gnu
-
-      # Setup OpenSBI
-      - if: matrix.arch == 'riscv64'
-        run: sudo apt-get install -y opensbi
-
-      # Setup: libelf
-      - run: sudo apt-get install -y libelf-dev
-
-      # Setup: QEMU
-      - if: matrix.arch == 'x86_64'
-        run: sudo apt-get install -y qemu-system-x86
-      - if: matrix.arch == 'arm' || matrix.arch == 'arm64'
-        run: sudo apt-get install -y qemu-system-arm
-      - if: matrix.arch == 'ppc64le'
-        run: sudo apt-get install -y qemu-system-ppc
-      - if: matrix.arch == 'riscv64'
-        run: |
-          curl -o bin/qemu-system-riscv64 https://raw.githubusercontent.com/Rust-for-Linux/ci-bin/master/qemu-6.0.0/bin/qemu-system-riscv64
-          chmod u+x bin/qemu-system-riscv64
-
-      # Setup: rustc
-      - if: matrix.install == 'rustup'
-        run: |
-          rustup default beta-${{ matrix.rustc }}
-          rustup component add rustfmt
-      - if: matrix.install == 'standalone'
-        run: |
-          # FIXME: there is no beta equivalent for https://static.rust-lang.org/dist/channel-rust-x.yy.z.toml,
-          # so just hardcode the URL/date for the moment, since we will moving to a stable release soon anyway.
-          curl https://static.rust-lang.org/dist/${{ matrix.rustc }}/rust-beta-x86_64-unknown-linux-gnu.tar.gz | tar xz
-          rust-beta-x86_64-unknown-linux-gnu/install.sh --without=rust-docs --prefix=$HOME/rustc
-          echo $HOME/rustc/bin >> $GITHUB_PATH
 
       # Setup: rustc native libs
       - if: matrix.sysroot == 'custom'
@@ -194,37 +190,12 @@ jobs:
           mkdir $(rustc ${{ env.RUSTC_SYSROOT }} --print sysroot)
           ln -s $(rustc --print sysroot)/lib $(rustc ${{ env.RUSTC_SYSROOT }} --print sysroot)/lib
 
-      # Setup: rustc source
-      - if: matrix.install == 'rustup' && matrix.sysroot == 'common'
-        run: rustup component add rust-src
-      - if: matrix.install != 'rustup' || matrix.sysroot != 'common'
-        run: |
-          git clone -n https://github.com/rust-lang/rust $(rustc ${{ env.RUSTC_SYSROOT }} --print sysroot)/lib/rustlib/src/rust
-          cd $(rustc ${{ env.RUSTC_SYSROOT }} --print sysroot)/lib/rustlib/src/rust
-          git checkout $(rustc -vV | grep -F 'commit-hash' | awk '{print $2}')
-          git submodule update --init library
-
-      # Setup: clippy
-      - run: rustup component add clippy
-
-      # Setup: bindgen
-      - run: |
-          curl -o bin/bindgen https://raw.githubusercontent.com/Rust-for-Linux/ci-bin/master/bindgen-0.56.0/bin/bindgen
-          chmod u+x bin/bindgen
-      
       # Setup: ccache
       - run: |
-          sudo apt-get install ccache
           echo '/usr/lib/ccache:$PATH' >> $GITHUB_PATH
-          echo 'CCACHE_COMPRESS=true' >> $GITHUB_ENV
-                
+
       # Setup: Check existing ccache
       - run: ccache -s
-
-      # Setup: busybox
-      - run: git clone --depth 1 -b 1_30_1 https://github.com/mirror/busybox
-      - run: mv .github/workflows/busybox.config busybox/.config
-      - run: cd busybox && make ${{ env.MAKE_CROSS_COMPILE }} -j3
 
       # Setup: module parameters test
       - run: |
@@ -244,7 +215,10 @@ jobs:
           echo 'obj-m	+= rust_module_parameters_loadable_custom.o'  >> samples/rust/Makefile
 
       # Build
-      - run: mv .github/workflows/kernel-${{ matrix.arch }}-${{ matrix.config }}.config .config
+      - if: matrix.lto == 'none'
+        run: mv .github/workflows/kernel-${{ matrix.arch }}-${{ matrix.config }}.config .config
+      - if: matrix.lto == 'thin'
+        run: mv .github/workflows/kernel-${{ matrix.arch }}-${{ matrix.config }}-thinlto.config .config
 
       - if: matrix.output == 'build'
         run: |
@@ -252,11 +226,20 @@ jobs:
           mv .config ${{ env.BUILD_DIR }}.config
           sed -i 's:samples/rust/:${{ env.BUILD_DIR }}samples/rust/:' .github/workflows/qemu-initramfs.desc
 
-      - run: make ${{ env.MAKE_ARCH }} ${{ env.MAKE_CROSS_COMPILE }} ${{ env.MAKE_TOOLCHAIN }} ${{ env.MAKE_OUTPUT }} ${{ env.MAKE_SYSROOT }} -j3
+      - run: make ${{ env.MAKE_ARCH }} ${{ env.MAKE_CROSS_COMPILE }} ${{ env.MAKE_LLVM_IAS }} ${{ env.MAKE_TOOLCHAIN }} ${{ env.MAKE_OUTPUT }} ${{ env.MAKE_SYSROOT }} -j3
+
+      # Print the final config used
+      - run: cat ${{ env.BUILD_DIR }}.config
+
+      # Make sure `CONFIG_WERROR` was enabled
+      - run: grep -F 'CONFIG_WERROR=y' ${{ env.BUILD_DIR }}.config
+
+      # Prepare image
+      - run: |
+          mv $HOME/busybox-${{ matrix.arch }} busybox
+          ${{ env.BUILD_DIR }}usr/gen_init_cpio .github/workflows/qemu-initramfs.desc > qemu-initramfs.img
 
       # Run
-      - run: ${{ env.BUILD_DIR }}usr/gen_init_cpio .github/workflows/qemu-initramfs.desc > qemu-initramfs.img
-
       - run: |
           qemu-system-${{ env.QEMU_ARCH }} \
             ${{ env.QEMU_ARGS }} \
@@ -275,7 +258,7 @@ jobs:
               rust_module_parameters_builtin_custom.my_usize=84 \
               rust_module_parameters_builtin_custom.my_array=1,2,3 \
             ' \
-            | sed s:$'\r'$:: \
+            | sed 's:\r$::' \
             | tee qemu-stdout.log
 
       # The kernel should not be generating any warnings
@@ -283,6 +266,9 @@ jobs:
           ! grep -v 'at mm/debug_vm_pgtable.c:' qemu-stdout.log | grep '] WARNING:'
 
       # Check
+      - run: |
+          grep '] ok 1 - rust_kernel_doctests$' qemu-stdout.log
+
       - run: |
           grep '] rust_minimal: Rust minimal sample (init)$' qemu-stdout.log
           grep '] rust_minimal: Am I built-in? false$'       qemu-stdout.log
@@ -379,6 +365,8 @@ jobs:
 
       # Report
       - run: |
+          cat ${{ env.BUILD_DIR }}.config
+
           ls -l \
             ${{ env.BUILD_DIR }}samples/rust/*.o \
             ${{ env.BUILD_DIR }}samples/rust/*.ko \
@@ -387,7 +375,7 @@ jobs:
             ${{ env.BUILD_DIR }}vmlinux \
             ${{ env.BUILD_DIR }}${{ env.IMAGE_PATH }}
 
-          size \
+          .github/workflows/size.sh \
             ${{ env.BUILD_DIR }}samples/rust/*.o \
             ${{ env.BUILD_DIR }}samples/rust/*.ko \
             ${{ env.BUILD_DIR }}drivers/android/rust_binder.o \
@@ -395,16 +383,33 @@ jobs:
             ${{ env.BUILD_DIR }}vmlinux
 
       # Clippy
-      - run: make ${{ env.MAKE_ARCH }} ${{ env.MAKE_CROSS_COMPILE }} ${{ env.MAKE_TOOLCHAIN }} ${{ env.MAKE_OUTPUT }} ${{ env.MAKE_SYSROOT }} -j3 CLIPPY=1
+      - run: make ${{ env.MAKE_ARCH }} ${{ env.MAKE_CROSS_COMPILE }} ${{ env.MAKE_LLVM_IAS }} ${{ env.MAKE_TOOLCHAIN }} ${{ env.MAKE_OUTPUT }} ${{ env.MAKE_SYSROOT }} -j3 CLIPPY=1
 
       # Docs
-      - run: make ${{ env.MAKE_ARCH }} ${{ env.MAKE_CROSS_COMPILE }} ${{ env.MAKE_TOOLCHAIN }} ${{ env.MAKE_OUTPUT }} ${{ env.MAKE_SYSROOT }} -j3 rustdoc
+      - run: make ${{ env.MAKE_ARCH }} ${{ env.MAKE_CROSS_COMPILE }} ${{ env.MAKE_LLVM_IAS }} ${{ env.MAKE_TOOLCHAIN }} ${{ env.MAKE_OUTPUT }} ${{ env.MAKE_SYSROOT }} -j3 rustdoc
 
       # Tests
-      - run: make ${{ env.MAKE_ARCH }} ${{ env.MAKE_CROSS_COMPILE }} ${{ env.MAKE_TOOLCHAIN }} ${{ env.MAKE_OUTPUT }} ${{ env.MAKE_SYSROOT }} -j3 rusttest
+      - run: make ${{ env.MAKE_ARCH }} ${{ env.MAKE_CROSS_COMPILE }} ${{ env.MAKE_LLVM_IAS }} ${{ env.MAKE_TOOLCHAIN }} ${{ env.MAKE_OUTPUT }} ${{ env.MAKE_SYSROOT }} -j3 rusttest
 
       # Formatting
-      - run: make ${{ env.MAKE_ARCH }} ${{ env.MAKE_CROSS_COMPILE }} ${{ env.MAKE_TOOLCHAIN }} ${{ env.MAKE_OUTPUT }} ${{ env.MAKE_SYSROOT }} -j3 rustfmtcheck
+      - run: make ${{ env.MAKE_ARCH }} ${{ env.MAKE_CROSS_COMPILE }} ${{ env.MAKE_LLVM_IAS }} ${{ env.MAKE_TOOLCHAIN }} ${{ env.MAKE_OUTPUT }} ${{ env.MAKE_SYSROOT }} -j3 rustfmtcheck
+
+      # Single targets
+      - run: |
+          rm ${{ env.BUILD_DIR }}samples/rust/rust_minimal.o
+
+          make ${{ env.MAKE_ARCH }} ${{ env.MAKE_CROSS_COMPILE }} ${{ env.MAKE_LLVM_IAS }} ${{ env.MAKE_TOOLCHAIN }} ${{ env.MAKE_OUTPUT }} ${{ env.MAKE_SYSROOT }} -j3 samples/rust/rust_minimal.o
+          make ${{ env.MAKE_ARCH }} ${{ env.MAKE_CROSS_COMPILE }} ${{ env.MAKE_LLVM_IAS }} ${{ env.MAKE_TOOLCHAIN }} ${{ env.MAKE_OUTPUT }} ${{ env.MAKE_SYSROOT }} -j3 samples/rust/rust_minimal.i
+          make ${{ env.MAKE_ARCH }} ${{ env.MAKE_CROSS_COMPILE }} ${{ env.MAKE_LLVM_IAS }} ${{ env.MAKE_TOOLCHAIN }} ${{ env.MAKE_OUTPUT }} ${{ env.MAKE_SYSROOT }} -j3 samples/rust/rust_minimal.s
+          make ${{ env.MAKE_ARCH }} ${{ env.MAKE_CROSS_COMPILE }} ${{ env.MAKE_LLVM_IAS }} ${{ env.MAKE_TOOLCHAIN }} ${{ env.MAKE_OUTPUT }} ${{ env.MAKE_SYSROOT }} -j3 samples/rust/rust_minimal.ll
+
+          file ${{ env.BUILD_DIR }}samples/rust/rust_minimal.o | grep -F 'ELF'
+          grep -F '#![feature(prelude_import)]' ${{ env.BUILD_DIR }}samples/rust/rust_minimal.i
+          grep -F '.text'                       ${{ env.BUILD_DIR }}samples/rust/rust_minimal.s
+          grep -F '; ModuleID'                  ${{ env.BUILD_DIR }}samples/rust/rust_minimal.ll
+
+      # Rust host programs
+      - run: ${{ env.BUILD_DIR }}samples/rust/hostprogs/single | grep -F 'The number is 42.'
 
       # View changes to ccache
       - run: ccache -s

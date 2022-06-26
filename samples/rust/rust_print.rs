@@ -1,25 +1,22 @@
 // SPDX-License-Identifier: GPL-2.0
 
-//! Rust printing macros sample
+//! Rust printing macros sample.
 
-#![no_std]
-#![feature(allocator_api, global_asm)]
-
-use kernel::pr_cont;
 use kernel::prelude::*;
+use kernel::{pr_cont, str::CStr, ThisModule};
 
 module! {
     type: RustPrint,
     name: b"rust_print",
     author: b"Rust for Linux Contributors",
     description: b"Rust printing macros sample",
-    license: b"GPL v2",
+    license: b"GPL",
 }
 
 struct RustPrint;
 
-impl KernelModule for RustPrint {
-    fn init() -> Result<Self> {
+impl kernel::Module for RustPrint {
+    fn init(_name: &'static CStr, _module: &'static ThisModule) -> Result<Self> {
         pr_info!("Rust printing macros sample (init)\n");
 
         pr_emerg!("Emergency message (level 0) without args\n");

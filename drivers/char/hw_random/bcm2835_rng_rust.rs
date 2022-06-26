@@ -2,22 +2,13 @@
 
 //! Broadcom BCM2835 Random Number Generator support.
 
-#![no_std]
-#![feature(allocator_api, global_asm)]
-
 use kernel::{
-    file::File,
-    file_operations::{FileOpener, FileOperations},
-    io_buffer::IoBufferWriter,
-    miscdev,
-    of::ConstOfMatchTable,
-    platdev::PlatformDriver,
-    prelude::*,
-    {c_str, platdev},
+    device, file, file::File, io_buffer::IoBufferWriter, miscdev, module_platform_driver, of,
+    platform, prelude::*, sync::Ref,
 };
 
-module! {
-    type: RngModule,
+module_platform_driver! {
+    type: RngDriver,
     name: b"bcm2835_rng_rust",
     author: b"Rust for Linux Contributors",
     description: b"BCM2835 Random Number Generator (RNG) driver",
@@ -26,16 +17,14 @@ module! {
 
 struct RngDevice;
 
-impl FileOpener<()> for RngDevice {
-    fn open(_state: &()) -> Result<Self::Wrapper> {
-        Ok(Box::try_new(RngDevice)?)
-    }
-}
-
-impl FileOperations for RngDevice {
+impl file::Operations for RngDevice {
     kernel::declare_file_operations!(read);
 
-    fn read<T: IoBufferWriter>(_: &Self, _: &File, data: &mut T, offset: u64) -> Result<usize> {
+    fn open(_open_data: &(), _file: &File) -> Result {
+        Ok(())
+    }
+
+    fn read(_: (), _: &File, data: &mut impl IoBufferWriter, offset: u64) -> Result<usize> {
         // Succeed if the caller doesn't provide a buffer or if not at the start.
         if data.is_empty() || offset != 0 {
             return Ok(0);
@@ -46,39 +35,29 @@ impl FileOperations for RngDevice {
     }
 }
 
+type DeviceData = device::Data<miscdev::Registration<RngDevice>, (), ()>;
+
 struct RngDriver;
+impl platform::Driver for RngDriver {
+    type Data = Ref<DeviceData>;
 
-impl PlatformDriver for RngDriver {
-    type DrvData = Pin<Box<miscdev::Registration<()>>>;
+    kernel::define_of_id_table! {(), [
+        (of::DeviceId::Compatible(b"brcm,bcm2835-rng"), None),
+    ]}
 
-    fn probe(device_id: i32) -> Result<Self::DrvData> {
-        pr_info!("probing discovered hwrng with id {}\n", device_id);
-        let drv_data =
-            miscdev::Registration::new_pinned::<RngDevice>(c_str!("rust_hwrng"), None, ())?;
-        Ok(drv_data)
-    }
-
-    fn remove(device_id: i32, _drv_data: Self::DrvData) -> Result {
-        pr_info!("removing hwrng with id {}\n", device_id);
-        Ok(())
-    }
-}
-
-struct RngModule {
-    _pdev: Pin<Box<platdev::Registration>>,
-}
-
-impl KernelModule for RngModule {
-    fn init() -> Result<Self> {
-        const OF_MATCH_TBL: ConstOfMatchTable<1> =
-            ConstOfMatchTable::new_const([c_str!("brcm,bcm2835-rng")]);
-
-        let pdev = platdev::Registration::new_pinned::<RngDriver>(
-            c_str!("bcm2835-rng-rust"),
-            Some(&OF_MATCH_TBL),
-            &THIS_MODULE,
+    fn probe(dev: &mut platform::Device, _id_info: Option<&Self::IdInfo>) -> Result<Self::Data> {
+        pr_info!("probing discovered hwrng with id {}\n", dev.id());
+        let data = kernel::new_device_data!(
+            miscdev::Registration::new(),
+            (),
+            (),
+            "BCM2835::Registrations"
         )?;
 
-        Ok(RngModule { _pdev: pdev })
+        data.registrations()
+            .ok_or(ENXIO)?
+            .as_pinned_mut()
+            .register(fmt!("rust_hwrng"), ())?;
+        Ok(data.into())
     }
 }

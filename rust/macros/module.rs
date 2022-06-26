@@ -2,59 +2,7 @@
 
 use proc_macro::{token_stream, Delimiter, Group, Literal, TokenStream, TokenTree};
 
-fn try_ident(it: &mut token_stream::IntoIter) -> Option<String> {
-    if let Some(TokenTree::Ident(ident)) = it.next() {
-        Some(ident.to_string())
-    } else {
-        None
-    }
-}
-
-fn try_literal(it: &mut token_stream::IntoIter) -> Option<String> {
-    if let Some(TokenTree::Literal(literal)) = it.next() {
-        Some(literal.to_string())
-    } else {
-        None
-    }
-}
-
-fn try_byte_string(it: &mut token_stream::IntoIter) -> Option<String> {
-    try_literal(it).and_then(|byte_string| {
-        if byte_string.starts_with("b\"") && byte_string.ends_with('\"') {
-            Some(byte_string[2..byte_string.len() - 1].to_string())
-        } else {
-            None
-        }
-    })
-}
-
-fn expect_ident(it: &mut token_stream::IntoIter) -> String {
-    try_ident(it).expect("Expected Ident")
-}
-
-fn expect_punct(it: &mut token_stream::IntoIter) -> char {
-    if let TokenTree::Punct(punct) = it.next().expect("Reached end of token stream for Punct") {
-        punct.as_char()
-    } else {
-        panic!("Expected Punct");
-    }
-}
-
-fn expect_literal(it: &mut token_stream::IntoIter) -> String {
-    try_literal(it).expect("Expected Literal")
-}
-
-fn expect_group(it: &mut token_stream::IntoIter) -> Group {
-    if let TokenTree::Group(group) = it.next().expect("Reached end of token stream for Group") {
-        group
-    } else {
-        panic!("Expected Group");
-    }
-}
-
-fn expect_byte_string(it: &mut token_stream::IntoIter) -> String {
-    try_byte_string(it).expect("Expected byte string")
-}
+use crate::helpers::*;
 
 #[derive(Clone, PartialEq)]
 enum ParamType {
@@ -86,28 +34,6 @@ fn expect_type(it: &mut token_stream::IntoIter) -> ParamType {
     } else {
         panic!("Expected Param Type")
     }
-}
-
-fn expect_end(it: &mut token_stream::IntoIter) {
-    if it.next().is_some() {
-        panic!("Expected end");
-    }
-}
-
-fn get_literal(it: &mut token_stream::IntoIter, expected_name: &str) -> String {
-    assert_eq!(expect_ident(it), expected_name);
-    assert_eq!(expect_punct(it), ':');
-    let literal = expect_literal(it);
-    assert_eq!(expect_punct(it), ',');
-    literal
-}
-
-fn get_byte_string(it: &mut token_stream::IntoIter, expected_name: &str) -> String {
-    assert_eq!(expect_ident(it), expected_name);
-    assert_eq!(expect_punct(it), ':');
-    let byte_string = expect_byte_string(it);
-    assert_eq!(expect_punct(it), ',');
-    byte_string
 }
 
 struct ModInfoBuilder<'a> {
@@ -222,12 +148,12 @@ fn try_simple_param_val(
     param_type: &str,
 ) -> Box<dyn Fn(&mut token_stream::IntoIter) -> Option<String>> {
     match param_type {
-        "bool" => Box::new(|param_it| try_ident(param_it)),
+        "bool" => Box::new(try_ident),
         "str" => Box::new(|param_it| {
             try_byte_string(param_it)
                 .map(|s| format!("kernel::module_param::StringParam::Ref(b\"{}\")", s))
         }),
-        _ => Box::new(|param_it| try_literal(param_it)),
+        _ => Box::new(try_literal),
     }
 }
 
@@ -377,14 +303,12 @@ impl ModuleInfo {
     }
 }
 
-pub fn module(ts: TokenStream) -> TokenStream {
+pub(crate) fn module(ts: TokenStream) -> TokenStream {
     let mut it = ts.into_iter();
 
     let info = ModuleInfo::parse(&mut it);
 
-    let name = info.name.clone();
-
-    let mut modinfo = ModInfoBuilder::new(&name);
+    let mut modinfo = ModInfoBuilder::new(info.name.as_ref());
     if let Some(author) = info.author {
         modinfo.emit("author", &author);
     }
@@ -396,7 +320,7 @@ pub fn module(ts: TokenStream) -> TokenStream {
         modinfo.emit("alias", &alias);
     }
 
-    // Built-in modules also export the `file` modinfo string
+    // Built-in modules also export the `file` modinfo string.
     let file =
         std::env::var("RUST_MODFILE").expect("Unable to fetch RUST_MODFILE environmental variable");
     modinfo.emit_only_builtin("file", &file);
@@ -427,8 +351,8 @@ pub fn module(ts: TokenStream) -> TokenStream {
             let param_description = get_byte_string(&mut param_it, "description");
             expect_end(&mut param_it);
 
-            // TODO: more primitive types
-            // TODO: other kinds: unsafes, etc.
+            // TODO: More primitive types.
+            // TODO: Other kinds: unsafes, etc.
             let (param_kernel_type, ops): (String, _) = match param_type {
                 ParamType::Ident(ref param_type) => (
                     param_type.to_string(),
@@ -470,7 +394,7 @@ pub fn module(ts: TokenStream) -> TokenStream {
                             unsafe {{ <{param_type_internal} as kernel::module_param::ModuleParam>::value(&__{name}_{param_name}_value) }}
                         }}
                     ",
-                    name = name,
+                    name = info.name,
                     param_name = param_name,
                     param_type_internal = param_type_internal,
                 )
@@ -482,7 +406,7 @@ pub fn module(ts: TokenStream) -> TokenStream {
                             unsafe {{ <{param_type_internal} as kernel::module_param::ModuleParam>::value(&__{name}_{param_name}_value) }}
                         }}
                     ",
-                    name = name,
+                    name = info.name,
                     param_name = param_name,
                     param_type_internal = param_type_internal,
                 )
@@ -493,7 +417,7 @@ pub fn module(ts: TokenStream) -> TokenStream {
                         arg: unsafe {{ &__{name}_{param_name}_value }} as *const _ as *mut kernel::c_types::c_void,
                     }},
                 ",
-                name = name,
+                name = info.name,
                 param_name = param_name,
             );
             modinfo.buffer.push_str(
@@ -513,7 +437,7 @@ pub fn module(ts: TokenStream) -> TokenStream {
                     // to undo GCC over-alignment of static structs of >32 bytes. It seems that is
                     // not the case anymore, so we simplify to a transparent representation here
                     // in the expectation that it is not needed anymore.
-                    // TODO: revisit this to confirm the above comment and remove it if it happened
+                    // TODO: Revisit this to confirm the above comment and remove it if it happened.
                     #[repr(transparent)]
                     struct __{name}_{param_name}_RacyKernelParam(kernel::bindings::kernel_param);
 
@@ -542,7 +466,7 @@ pub fn module(ts: TokenStream) -> TokenStream {
                         __bindgen_anon_1: {kparam}
                     }});
                     ",
-                    name = name,
+                    name = info.name,
                     param_type_internal = param_type_internal,
                     read_func = read_func,
                     param_default = param_default,
@@ -579,6 +503,15 @@ pub fn module(ts: TokenStream) -> TokenStream {
             /// Used by the printing macros, e.g. [`info!`].
             const __LOG_PREFIX: &[u8] = b\"{name}\\0\";
 
+            /// The \"Rust loadable module\" mark, for `scripts/is_rust_module.sh`.
+            //
+            // This may be best done another way later on, e.g. as a new modinfo
+            // key or a new section. For the moment, keep it simple.
+            #[cfg(MODULE)]
+            #[doc(hidden)]
+            #[used]
+            static __IS_RUST_MODULE: () = ();
+
             static mut __MOD: Option<{type_}> = None;
 
             // SAFETY: `__this_module` is constructed by the kernel at load time and will not be freed until the module is unloaded.
@@ -587,7 +520,7 @@ pub fn module(ts: TokenStream) -> TokenStream {
             #[cfg(not(MODULE))]
             static THIS_MODULE: kernel::ThisModule = unsafe {{ kernel::ThisModule::from_ptr(core::ptr::null_mut()) }};
 
-            // Loadable modules need to export the `{{init,cleanup}}_module` identifiers
+            // Loadable modules need to export the `{{init,cleanup}}_module` identifiers.
             #[cfg(MODULE)]
             #[doc(hidden)]
             #[no_mangle]
@@ -603,7 +536,7 @@ pub fn module(ts: TokenStream) -> TokenStream {
             }}
 
             // Built-in modules are initialized through an initcall pointer
-            // and the identifiers need to be unique
+            // and the identifiers need to be unique.
             #[cfg(not(MODULE))]
             #[cfg(not(CONFIG_HAVE_ARCH_PREL32_RELOCATIONS))]
             #[doc(hidden)]
@@ -613,7 +546,7 @@ pub fn module(ts: TokenStream) -> TokenStream {
 
             #[cfg(not(MODULE))]
             #[cfg(CONFIG_HAVE_ARCH_PREL32_RELOCATIONS)]
-            global_asm!(
+            core::arch::global_asm!(
                 r#\".section \"{initcall_section}\", \"a\"
                 __{name}_initcall:
                     .long   __{name}_init - .
@@ -636,7 +569,7 @@ pub fn module(ts: TokenStream) -> TokenStream {
             }}
 
             fn __init() -> kernel::c_types::c_int {{
-                match <{type_} as kernel::KernelModule>::init() {{
+                match <{type_} as kernel::Module>::init(kernel::c_str!(\"{name}\"), &THIS_MODULE) {{
                     Ok(m) => {{
                         unsafe {{
                             __MOD = Some(m);
@@ -666,62 +599,6 @@ pub fn module(ts: TokenStream) -> TokenStream {
         generated_array_types = generated_array_types,
         initcall_section = ".initcall6.init"
     ).parse().expect("Error parsing formatted string into token stream.")
-}
-
-pub fn module_misc_device(ts: TokenStream) -> TokenStream {
-    let mut it = ts.into_iter();
-
-    let info = ModuleInfo::parse(&mut it);
-
-    let module = format!("__internal_ModuleFor{}", info.type_);
-
-    format!(
-        "
-            #[doc(hidden)]
-            struct {module} {{
-                _dev: core::pin::Pin<alloc::boxed::Box<kernel::miscdev::Registration>>,
-            }}
-
-            impl kernel::KernelModule for {module} {{
-                fn init() -> kernel::Result<Self> {{
-                    Ok(Self {{
-                        _dev: kernel::miscdev::Registration::new_pinned::<{type_}>(
-                            kernel::c_str!(\"{name}\"),
-                            None,
-                            (),
-                        )?,
-                    }})
-                }}
-            }}
-
-            kernel::prelude::module! {{
-                type: {module},
-                name: b\"{name}\",
-                {author}
-                {description}
-                license: b\"{license}\",
-                {alias}
-            }}
-        ",
-        module = module,
-        type_ = info.type_,
-        name = info.name,
-        author = info
-            .author
-            .map(|v| format!("author: b\"{}\",", v))
-            .unwrap_or_else(|| "".to_string()),
-        description = info
-            .description
-            .map(|v| format!("description: b\"{}\",", v))
-            .unwrap_or_else(|| "".to_string()),
-        alias = info
-            .alias
-            .map(|v| format!("alias: b\"{}\",", v))
-            .unwrap_or_else(|| "".to_string()),
-        license = info.license
-    )
-    .parse()
-    .expect("Error parsing formatted string into token stream.")
 }
 
 #[cfg(test)]

@@ -1,13 +1,9 @@
-.. _rust_quick_start:
+.. SPDX-License-Identifier: GPL-2.0
 
 Quick Start
 ===========
 
 This document describes how to get started with kernel development in Rust.
-If you have worked previously with Rust, this will only take a moment.
-
-Please note that, at the moment, a very restricted subset of architectures
-is supported, see :doc:`/rust/arch-support`.
 
 
 Requirements: Building
@@ -15,26 +11,36 @@ Requirements: Building
 
 This section explains how to fetch the tools needed for building.
 
-Some of these requirements might be available from your Linux distribution
+Some of these requirements might be available from Linux distributions
 under names like ``rustc``, ``rust-src``, ``rust-bindgen``, etc. However,
-at the time of writing, they are likely to not be recent enough.
+at the time of writing, they are likely not to be recent enough unless
+the distribution tracks the latest releases.
+
+To easily check whether the requirements are met, the following target
+can be used::
+
+	make LLVM=1 rustavailable
+
+This triggers the same logic used by Kconfig to determine whether
+``RUST_IS_AVAILABLE`` should be enabled; but it also explains why not
+if that is the case.
 
 
 rustc
 *****
 
-A particular version (`1.54.0-beta.1`) of the Rust compiler is required.
-Newer versions may or may not work because, for the moment, we depend on
-some unstable Rust features.
+A particular version of the Rust compiler is required. Newer versions may or
+may not work because, for the moment, the kernel depends on some unstable
+Rust features.
 
-If you are using ``rustup``, enter the checked out source code directory
+If ``rustup`` is being used, enter the checked out source code directory
 and run::
 
-    rustup override set beta-2021-06-23
+	rustup override set $(scripts/min-tool-version.sh rustc)
 
 Otherwise, fetch a standalone installer or install ``rustup`` from:
 
-    https://www.rust-lang.org
+	https://www.rust-lang.org
 
 
 Rust standard library source
@@ -43,35 +49,44 @@ Rust standard library source
 The Rust standard library source is required because the build system will
 cross-compile ``core`` and ``alloc``.
 
-If you are using ``rustup``, run::
+If ``rustup`` is being used, run::
 
-    rustup component add rust-src
+	rustup component add rust-src
 
-Otherwise, if you used a standalone installer, you can clone the Rust
-repository into the installation folder of your nightly toolchain::
+The components are installed per toolchain, thus upgrading the Rust compiler
+version later on requires re-adding the component.
 
-    git clone --recurse-submodules https://github.com/rust-lang/rust $(rustc --print sysroot)/lib/rustlib/src/rust
+Otherwise, if a standalone installer is used, the Rust repository may be cloned
+into the installation folder of the toolchain::
+
+	git clone --recurse-submodules \
+		--branch $(scripts/min-tool-version.sh rustc) \
+		https://github.com/rust-lang/rust \
+		$(rustc --print sysroot)/lib/rustlib/src/rust
+
+In this case, upgrading the Rust compiler version later on requires manually
+updating this clone.
 
 
 libclang
 ********
 
 ``libclang`` (part of LLVM) is used by ``bindgen`` to understand the C code
-in the kernel, which means you will need an LLVM installed; like when
-you compile the kernel with ``CC=clang`` or ``LLVM=1``.
+in the kernel, which means LLVM needs to be installed; like when the kernel
+is compiled with ``CC=clang`` or ``LLVM=1``.
 
-Your Linux distribution is likely to have a suitable one available, so it is
-best if you check that first.
+Linux distributions are likely to have a suitable one available, so it is
+best to check that first.
 
 There are also some binaries for several systems and architectures uploaded at:
 
-    https://releases.llvm.org/download.html
+	https://releases.llvm.org/download.html
 
 Otherwise, building LLVM takes quite a while, but it is not a complex process:
 
-    https://llvm.org/docs/GettingStarted.html#getting-the-source-code-and-building-llvm
+	https://llvm.org/docs/GettingStarted.html#getting-the-source-code-and-building-llvm
 
-See Documentation/kbuild/llvm.rst for more information and further ways
+Please see Documentation/kbuild/llvm.rst for more information and further ways
 to fetch pre-built releases and distribution packages.
 
 
@@ -79,18 +94,18 @@ bindgen
 *******
 
 The bindings to the C side of the kernel are generated at build time using
-the ``bindgen`` tool. The version we currently support is ``0.56.0``.
+the ``bindgen`` tool. A particular version is required.
 
-Install it via (this will build the tool from source)::
+Install it via (note that this will download and build the tool from source)::
 
-    cargo install --locked --version 0.56.0 bindgen
+	cargo install --locked --version $(scripts/min-tool-version.sh bindgen) bindgen
 
 
 Requirements: Developing
 ------------------------
 
 This section explains how to fetch the tools needed for developing. That is,
-if you only want to build the kernel, you do not need them.
+they are not needed when just building the kernel.
 
 
 rustfmt
@@ -98,13 +113,13 @@ rustfmt
 
 The ``rustfmt`` tool is used to automatically format all the Rust kernel code,
 including the generated C bindings (for details, please see
-:ref:`Documentation/rust/coding.rst <rust_coding>`).
+coding-guidelines.rst).
 
-If you are using ``rustup``, its ``default`` profile already installs the tool,
-so you should be good to go. If you are using another profile, you can install
-the component manually::
+If ``rustup`` is being used, its ``default`` profile already installs the tool,
+thus nothing needs to be done. If another profile is being used, the component
+can be installed manually::
 
-    rustup component add rustfmt
+	rustup component add rustfmt
 
 The standalone installers also come with ``rustfmt``.
 
@@ -112,15 +127,15 @@ The standalone installers also come with ``rustfmt``.
 clippy
 ******
 
-``clippy`` is a Rust linter. Installing it allows you to get extra warnings
-for Rust code passing ``CLIPPY=1`` to ``make`` (for details, please see
-:ref:`Documentation/rust/coding.rst <rust_coding>`).
+``clippy`` is a Rust linter. Running it provides extra warnings for Rust code.
+It can be run by passing ``CLIPPY=1`` to ``make`` (for details, please see
+general-information.rst).
 
-If you are using ``rustup``, its ``default`` profile already installs the tool,
-so you should be good to go. If you are using another profile, you can install
-the component manually::
+If ``rustup`` is being used, its ``default`` profile already installs the tool,
+thus nothing needs to be done. If another profile is being used, the component
+can be installed manually::
 
-    rustup component add clippy
+	rustup component add clippy
 
 The standalone installers also come with ``clippy``.
 
@@ -129,11 +144,14 @@ cargo
 *****
 
 ``cargo`` is the Rust native build system. It is currently required to run
-the tests (``rusttest`` target) since we use it to build a custom standard
-library that contains the facilities provided by our custom ``alloc``.
+the tests since it is used to build a custom standard library that contains
+the facilities provided by the custom ``alloc`` in the kernel. The tests can
+be run using the ``rusttest`` Make target.
 
-If you are using ``rustup``, all the profiles already install the tool,
-so you should be good to go. The standalone installers also include ``cargo``.
+If ``rustup`` is being used, all the profiles already install the tool,
+thus nothing needs to be done.
+
+The standalone installers also come with ``cargo``.
 
 
 rustdoc
@@ -141,14 +159,16 @@ rustdoc
 
 ``rustdoc`` is the documentation tool for Rust. It generates pretty HTML
 documentation for Rust code (for details, please see
-:ref:`Documentation/rust/docs.rst <rust_docs>`.
+general-information.rst).
 
-``rustdoc`` is also able to test the examples provided in documented Rust code
-(called doctests or documentation tests). We use this feature, thus ``rustdoc``
-is required to run the tests (``rusttest`` target).
+``rustdoc`` is also used to test the examples provided in documented Rust code
+(called doctests or documentation tests). The ``rusttest`` Make target uses
+this feature.
 
-If you are using ``rustup``, all the profiles already install the tool,
-so you should be good to go. The standalone installers also include ``rustdoc``.
+If ``rustup`` is being used, all the profiles already install the tool,
+thus nothing needs to be done.
+
+The standalone installers also come with ``rustdoc``.
 
 
 rust-analyzer
@@ -158,25 +178,23 @@ The `rust-analyzer <https://rust-analyzer.github.io/>`_ language server can
 be used with many editors to enable syntax highlighting, completion, go to
 definition, and other features.
 
-``rust-analyzer`` will need to be
-`configured <https://rust-analyzer.github.io/manual.html#non-cargo-based-projects>`_
-to work with the kernel by adding a ``rust-project.json`` file in the root folder.
-A ``rust-project.json`` can be generated by building the Make target ``rust-analyzer``,
-which will create a ``rust-project.json`` in the root of the output directory.
+``rust-analyzer`` needs a configuration file, ``rust-project.json``, which
+can be generated by the ``rust-analyzer`` Make target.
 
 
 Configuration
 -------------
 
 ``Rust support`` (``CONFIG_RUST``) needs to be enabled in the ``General setup``
-menu. The option is only shown if the build system can locate ``rustc``.
-In turn, this will make visible the rest of options that depend on Rust.
+menu. The option is only shown if a suitable Rust toolchain is found (see
+above), as long as the other requirements are met. In turn, this will make
+visible the rest of options that depend on Rust.
 
 Afterwards, go to::
 
-    Kernel hacking
-      -> Sample kernel code
-           -> Rust samples
+	Kernel hacking
+	    -> Sample kernel code
+	        -> Rust samples
 
 And enable some sample modules either as built-in or as loadable.
 
@@ -187,33 +205,28 @@ Building
 Building a kernel with a complete LLVM toolchain is the best supported setup
 at the moment. That is::
 
-    make LLVM=1
+	make LLVM=1
 
 For architectures that do not support a full LLVM toolchain, use::
 
-    make CC=clang
+	make CC=clang
 
-Using GCC also works for some configurations, but it is *very* experimental at
+Using GCC also works for some configurations, but it is very experimental at
 the moment.
 
 
 Hacking
 -------
 
-If you want to dive deeper, take a look at the source code of the samples
+To dive deeper, take a look at the source code of the samples
 at ``samples/rust/``, the Rust support code under ``rust/`` and
 the ``Rust hacking`` menu under ``Kernel hacking``.
 
-If you use GDB/Binutils and Rust symbols aren't getting demangled, the reason
-is your toolchain doesn't support Rust's new v0 mangling scheme yet. There are
-a few ways out:
+If GDB/Binutils is used and Rust symbols are not getting demangled, the reason
+is the toolchain does not support Rust's new v0 mangling scheme yet.
+There are a few ways out:
 
   - Install a newer release (GDB >= 10.2, Binutils >= 2.36).
 
-  - If you only need GDB and can enable ``CONFIG_DEBUG_INFO``, do so:
-    some versions of GDB (e.g. vanilla GDB 10.1) are able to use
-    the pre-demangled names embedded in the debug info.
-
-  - If you don't need loadable module support, you may compile without
-    the ``-Zsymbol-mangling-version=v0`` flag. However, we don't maintain
-    support for that, so avoid it unless you are in a hurry.
+  - Some versions of GDB (e.g. vanilla GDB 10.1) are able to use
+    the pre-demangled names embedded in the debug info (``CONFIG_DEBUG_INFO``).

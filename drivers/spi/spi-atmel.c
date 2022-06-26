@@ -352,8 +352,6 @@ static void cs_activate(struct atmel_spi *as, struct spi_device *spi)
 		}
 
 		mr = spi_readl(as, MR);
-		if (spi->cs_gpiod)
-			gpiod_set_value(spi->cs_gpiod, 1);
 	} else {
 		u32 cpol = (spi->mode & SPI_CPOL) ? SPI_BIT(CPOL) : 0;
 		int i;
@@ -369,8 +367,6 @@ static void cs_activate(struct atmel_spi *as, struct spi_device *spi)
 
 		mr = spi_readl(as, MR);
 		mr = SPI_BFINS(PCS, ~(1 << chip_select), mr);
-		if (spi->cs_gpiod)
-			gpiod_set_value(spi->cs_gpiod, 1);
 		spi_writel(as, MR, mr);
 	}
 
@@ -400,8 +396,6 @@ static void cs_deactivate(struct atmel_spi *as, struct spi_device *spi)
 
 	if (!spi->cs_gpiod)
 		spi_writel(as, CR, SPI_BIT(LASTXFER));
-	else
-		gpiod_set_value(spi->cs_gpiod, 0);
 }
 
 static void atmel_spi_lock(struct atmel_spi *as) __acquires(&as->lock)
@@ -439,26 +433,25 @@ static bool atmel_spi_can_dma(struct spi_master *master,
 
 }
 
-static int atmel_spi_dma_slave_config(struct atmel_spi *as,
-				struct dma_slave_config *slave_config,
-				u8 bits_per_word)
+static int atmel_spi_dma_slave_config(struct atmel_spi *as, u8 bits_per_word)
 {
 	struct spi_master *master = platform_get_drvdata(as->pdev);
+	struct dma_slave_config	slave_config;
 	int err = 0;
 
 	if (bits_per_word > 8) {
-		slave_config->dst_addr_width = DMA_SLAVE_BUSWIDTH_2_BYTES;
-		slave_config->src_addr_width = DMA_SLAVE_BUSWIDTH_2_BYTES;
+		slave_config.dst_addr_width = DMA_SLAVE_BUSWIDTH_2_BYTES;
+		slave_config.src_addr_width = DMA_SLAVE_BUSWIDTH_2_BYTES;
 	} else {
-		slave_config->dst_addr_width = DMA_SLAVE_BUSWIDTH_1_BYTE;
-		slave_config->src_addr_width = DMA_SLAVE_BUSWIDTH_1_BYTE;
+		slave_config.dst_addr_width = DMA_SLAVE_BUSWIDTH_1_BYTE;
+		slave_config.src_addr_width = DMA_SLAVE_BUSWIDTH_1_BYTE;
 	}
 
-	slave_config->dst_addr = (dma_addr_t)as->phybase + SPI_TDR;
-	slave_config->src_addr = (dma_addr_t)as->phybase + SPI_RDR;
-	slave_config->src_maxburst = 1;
-	slave_config->dst_maxburst = 1;
-	slave_config->device_fc = false;
+	slave_config.dst_addr = (dma_addr_t)as->phybase + SPI_TDR;
+	slave_config.src_addr = (dma_addr_t)as->phybase + SPI_RDR;
+	slave_config.src_maxburst = 1;
+	slave_config.dst_maxburst = 1;
+	slave_config.device_fc = false;
 
 	/*
 	 * This driver uses fixed peripheral select mode (PS bit set to '0' in
@@ -470,12 +463,11 @@ static int atmel_spi_dma_slave_config(struct atmel_spi *as,
 	 * However, the first data has to be written into the lowest 16 bits and
 	 * the second data into the highest 16 bits of the Transmit
 	 * Data Register. For 8bit data (the most frequent case), it would
-	 * require to rework tx_buf so each data would actualy fit 16 bits.
+	 * require to rework tx_buf so each data would actually fit 16 bits.
 	 * So we'd rather write only one data at the time. Hence the transmit
 	 * path works the same whether FIFOs are available (and enabled) or not.
 	 */
-	slave_config->direction = DMA_MEM_TO_DEV;
-	if (dmaengine_slave_config(master->dma_tx, slave_config)) {
+	if (dmaengine_slave_config(master->dma_tx, &slave_config)) {
 		dev_err(&as->pdev->dev,
 			"failed to configure tx dma channel\n");
 		err = -EINVAL;
@@ -489,8 +481,7 @@ static int atmel_spi_dma_slave_config(struct atmel_spi *as,
 	 * So the receive path works the same whether FIFOs are available (and
 	 * enabled) or not.
 	 */
-	slave_config->direction = DMA_DEV_TO_MEM;
-	if (dmaengine_slave_config(master->dma_rx, slave_config)) {
+	if (dmaengine_slave_config(master->dma_rx, &slave_config)) {
 		dev_err(&as->pdev->dev,
 			"failed to configure rx dma channel\n");
 		err = -EINVAL;
@@ -502,7 +493,6 @@ static int atmel_spi_dma_slave_config(struct atmel_spi *as,
 static int atmel_spi_configure_dma(struct spi_master *master,
 				   struct atmel_spi *as)
 {
-	struct dma_slave_config	slave_config;
 	struct device *dev = &as->pdev->dev;
 	int err;
 
@@ -524,7 +514,7 @@ static int atmel_spi_configure_dma(struct spi_master *master,
 		goto error;
 	}
 
-	err = atmel_spi_dma_slave_config(as, &slave_config, 8);
+	err = atmel_spi_dma_slave_config(as, 8);
 	if (err)
 		goto error;
 
@@ -706,7 +696,6 @@ static int atmel_spi_next_xfer_dma_submit(struct spi_master *master,
 	struct dma_chan		*txchan = master->dma_tx;
 	struct dma_async_tx_descriptor *rxdesc;
 	struct dma_async_tx_descriptor *txdesc;
-	struct dma_slave_config	slave_config;
 	dma_cookie_t		cookie;
 
 	dev_vdbg(master->dev.parent, "atmel_spi_next_xfer_dma_submit\n");
@@ -718,8 +707,7 @@ static int atmel_spi_next_xfer_dma_submit(struct spi_master *master,
 
 	*plen = xfer->len;
 
-	if (atmel_spi_dma_slave_config(as, &slave_config,
-				       xfer->bits_per_word))
+	if (atmel_spi_dma_slave_config(as, xfer->bits_per_word))
 		goto err_exit;
 
 	/* Send both scatterlists */
@@ -1307,7 +1295,7 @@ static int atmel_spi_one_transfer(struct spi_master *master,
 	 * DMA map early, for performance (empties dcache ASAP) and
 	 * better fault reporting.
 	 */
-	if ((!master->cur_msg_mapped)
+	if ((!master->cur_msg->is_dma_mapped)
 		&& as->use_pdc) {
 		if (atmel_spi_dma_map_xfer(as, xfer) < 0)
 			return -ENOMEM;
@@ -1387,7 +1375,7 @@ static int atmel_spi_one_transfer(struct spi_master *master,
 		}
 	}
 
-	if (!master->cur_msg_mapped
+	if (!master->cur_msg->is_dma_mapped
 		&& as->use_pdc)
 		atmel_spi_dma_unmap_xfer(master, xfer);
 
@@ -1483,7 +1471,8 @@ static int atmel_spi_probe(struct platform_device *pdev)
 	master->bus_num = pdev->id;
 	master->num_chipselect = 4;
 	master->setup = atmel_spi_setup;
-	master->flags = (SPI_MASTER_MUST_RX | SPI_MASTER_MUST_TX);
+	master->flags = (SPI_MASTER_MUST_RX | SPI_MASTER_MUST_TX |
+			SPI_MASTER_GPIO_SS);
 	master->transfer_one = atmel_spi_one_transfer;
 	master->set_cs = atmel_spi_set_cs;
 	master->cleanup = atmel_spi_cleanup;

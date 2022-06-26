@@ -176,7 +176,7 @@ char *cifs_compose_mount_options(const char *sb_mountdata,
 		}
 	}
 
-	rc = dns_resolve_server_name_to_ip(name, &srvIP);
+	rc = dns_resolve_server_name_to_ip(name, &srvIP, NULL);
 	if (rc < 0) {
 		cifs_dbg(FYI, "%s: Failed to resolve server part of %s to IP: %d\n",
 			 __func__, name, rc);
@@ -211,6 +211,10 @@ char *cifs_compose_mount_options(const char *sb_mountdata,
 		else
 			noff = tkn_e - (sb_mountdata + off) + 1;
 
+		if (strncasecmp(sb_mountdata + off, "cruid=", 6) == 0) {
+			off += noff;
+			continue;
+		}
 		if (strncasecmp(sb_mountdata + off, "unc=", 4) == 0) {
 			off += noff;
 			continue;
@@ -303,12 +307,8 @@ static struct vfsmount *cifs_dfs_do_mount(struct dentry *mntpt,
 static struct vfsmount *cifs_dfs_do_automount(struct dentry *mntpt)
 {
 	struct cifs_sb_info *cifs_sb;
-	struct cifs_ses *ses;
-	struct cifs_tcon *tcon;
 	void *page;
-	char *full_path, *root_path;
-	unsigned int xid;
-	int rc;
+	char *full_path;
 	struct vfsmount *mnt;
 
 	cifs_dbg(FYI, "in %s\n", __func__);
@@ -320,8 +320,6 @@ static struct vfsmount *cifs_dfs_do_automount(struct dentry *mntpt)
 	 * the double backslashes usually used in the UNC. This function
 	 * gives us the latter, so we must adjust the result.
 	 */
-	mnt = ERR_PTR(-ENOMEM);
-
 	cifs_sb = CIFS_SB(mntpt->d_sb);
 	if (cifs_sb->mnt_cifs_flags & CIFS_MOUNT_NO_DFS) {
 		mnt = ERR_PTR(-EREMOTE);
@@ -337,60 +335,11 @@ static struct vfsmount *cifs_dfs_do_automount(struct dentry *mntpt)
 	}
 
 	convert_delimiter(full_path, '\\');
-
 	cifs_dbg(FYI, "%s: full_path: %s\n", __func__, full_path);
 
-	if (!cifs_sb_master_tlink(cifs_sb)) {
-		cifs_dbg(FYI, "%s: master tlink is NULL\n", __func__);
-		goto free_full_path;
-	}
-
-	tcon = cifs_sb_master_tcon(cifs_sb);
-	if (!tcon) {
-		cifs_dbg(FYI, "%s: master tcon is NULL\n", __func__);
-		goto free_full_path;
-	}
-
-	root_path = kstrdup(tcon->treeName, GFP_KERNEL);
-	if (!root_path) {
-		mnt = ERR_PTR(-ENOMEM);
-		goto free_full_path;
-	}
-	cifs_dbg(FYI, "%s: root path: %s\n", __func__, root_path);
-
-	ses = tcon->ses;
-	xid = get_xid();
-
-	/*
-	 * If DFS root has been expired, then unconditionally fetch it again to
-	 * refresh DFS referral cache.
-	 */
-	rc = dfs_cache_find(xid, ses, cifs_sb->local_nls, cifs_remap(cifs_sb),
-			    root_path + 1, NULL, NULL);
-	if (!rc) {
-		rc = dfs_cache_find(xid, ses, cifs_sb->local_nls,
-				    cifs_remap(cifs_sb), full_path + 1,
-				    NULL, NULL);
-	}
-
-	free_xid(xid);
-
-	if (rc) {
-		mnt = ERR_PTR(rc);
-		goto free_root_path;
-	}
-	/*
-	 * OK - we were able to get and cache a referral for @full_path.
-	 *
-	 * Now, pass it down to cifs_mount() and it will retry every available
-	 * node server in case of failures - no need to do it here.
-	 */
 	mnt = cifs_dfs_do_mount(mntpt, cifs_sb, full_path);
-	cifs_dbg(FYI, "%s: cifs_dfs_do_mount:%s , mnt:%p\n", __func__,
-		 full_path + 1, mnt);
+	cifs_dbg(FYI, "%s: cifs_dfs_do_mount:%s , mnt:%p\n", __func__, full_path + 1, mnt);
 
-free_root_path:
-	kfree(root_path);
 free_full_path:
 	free_dentry_path(page);
 cdda_exit:

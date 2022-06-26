@@ -371,7 +371,7 @@ static void __rate_control_send_low(struct ieee80211_hw *hw,
 	WARN_ONCE(i == sband->n_bitrates,
 		  "no supported rates for sta %pM (0x%x, band %d) in rate_mask 0x%x with flags 0x%x\n",
 		  sta ? sta->addr : NULL,
-		  sta ? sta->supp_rates[sband->band] : -1,
+		  sta ? sta->deflink.supp_rates[sband->band] : -1,
 		  sband->band,
 		  rate_mask, rate_flags);
 
@@ -391,10 +391,6 @@ static bool rate_control_send_low(struct ieee80211_sta *pubsta,
 	struct sta_info *sta;
 	int mcast_rate;
 	bool use_basicrate = false;
-
-	if (ieee80211_is_tx_data(txrc->skb) &&
-	    info->flags & IEEE80211_TX_CTL_NO_ACK)
-		return false;
 
 	if (!pubsta || rc_no_data_or_no_ack_use_min(txrc)) {
 		__rate_control_send_low(txrc->hw, sband, pubsta, info,
@@ -785,11 +781,11 @@ static bool rate_control_cap_mask(struct ieee80211_sub_if_data *sdata,
 		u16 sta_vht_mask[NL80211_VHT_NSS_MAX];
 
 		/* Filter out rates that the STA does not support */
-		*mask &= sta->supp_rates[sband->band];
+		*mask &= sta->deflink.supp_rates[sband->band];
 		for (i = 0; i < IEEE80211_HT_MCS_MASK_LEN; i++)
-			mcs_mask[i] &= sta->ht_cap.mcs.rx_mask[i];
+			mcs_mask[i] &= sta->deflink.ht_cap.mcs.rx_mask[i];
 
-		sta_vht_cap = sta->vht_cap.vht_mcs.rx_mcs_map;
+		sta_vht_cap = sta->deflink.vht_cap.vht_mcs.rx_mcs_map;
 		ieee80211_get_vht_mask_from_cap(sta_vht_cap, sta_vht_mask);
 		for (i = 0; i < NL80211_VHT_NSS_MAX; i++)
 			vht_mask[i] &= sta_vht_mask[i];

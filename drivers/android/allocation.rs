@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: GPL-2.0
 
 use core::mem::{replace, size_of, MaybeUninit};
-use kernel::{bindings, linked_list::List, pages::Pages, prelude::*, user_ptr::UserSlicePtrReader};
+use kernel::{
+    bindings, linked_list::List, pages::Pages, prelude::*, sync::Ref, user_ptr::UserSlicePtrReader,
+};
 
 use crate::{
     defs::*,
@@ -15,7 +17,7 @@ pub(crate) struct Allocation<'a> {
     pub(crate) offset: usize,
     size: usize,
     pub(crate) ptr: usize,
-    pages: Arc<[Pages<0>]>,
+    pages: Ref<[Pages<0>]>,
     pub(crate) process: &'a Process,
     allocation_info: Option<AllocationInfo>,
     free_on_drop: bool,
@@ -28,7 +30,7 @@ impl<'a> Allocation<'a> {
         offset: usize,
         size: usize,
         ptr: usize,
-        pages: Arc<[Pages<0>]>,
+        pages: Ref<[Pages<0>]>,
     ) -> Self {
         Self {
             process,
@@ -55,8 +57,8 @@ impl<'a> Allocation<'a> {
         T: FnMut(&Pages<0>, usize, usize) -> Result,
     {
         // Check that the request is within the buffer.
-        if offset.checked_add(size).ok_or(Error::EINVAL)? > self.size {
-            return Err(Error::EINVAL);
+        if offset.checked_add(size).ok_or(EINVAL)? > self.size {
+            return Err(EINVAL);
         }
         offset += self.offset;
         let mut page_index = offset >> bindings::PAGE_SHIFT;
@@ -154,16 +156,16 @@ impl<'a, 'b> AllocationView<'a, 'b> {
         AllocationView { alloc, limit }
     }
 
-    pub fn read<T>(&self, offset: usize) -> Result<T> {
-        if offset.checked_add(size_of::<T>()).ok_or(Error::EINVAL)? > self.limit {
-            return Err(Error::EINVAL);
+    pub(crate) fn read<T>(&self, offset: usize) -> Result<T> {
+        if offset.checked_add(size_of::<T>()).ok_or(EINVAL)? > self.limit {
+            return Err(EINVAL);
         }
         self.alloc.read(offset)
     }
 
-    pub fn write<T>(&self, offset: usize, obj: &T) -> Result {
-        if offset.checked_add(size_of::<T>()).ok_or(Error::EINVAL)? > self.limit {
-            return Err(Error::EINVAL);
+    pub(crate) fn write<T>(&self, offset: usize, obj: &T) -> Result {
+        if offset.checked_add(size_of::<T>()).ok_or(EINVAL)? > self.limit {
+            return Err(EINVAL);
         }
         self.alloc.write(offset, obj)
     }

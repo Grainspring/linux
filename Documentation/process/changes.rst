@@ -7,7 +7,7 @@ Intro
 =====
 
 This document is designed to provide a list of the minimum levels of
-software necessary to run the 4.x kernels.
+software necessary to run the current kernel version.
 
 This document is originally based on my "Changes" file for 2.0.x kernels
 and therefore owes credit to the same people as that file (Jared Mauch,
@@ -26,22 +26,18 @@ running a Linux kernel.  Also, not all tools are necessary on all
 systems; obviously, if you don't have any PC Card hardware, for example,
 you probably needn't concern yourself with pcmciautils.
 
-Furthermore, note that newer versions of the Rust toolchain may or may not work
-because, for the moment, we depend on some unstable features. Thus, unless you
-know what you are doing, use the exact version listed here. Please see
-:ref:`Documentation/rust/quick-start.rst <rust_quick_start>` for details.
-
 ====================== ===============  ========================================
         Program        Minimal version       Command to check the version
 ====================== ===============  ========================================
-GNU C                  4.9              gcc --version
-Clang/LLVM (optional)  10.0.1           clang --version
-rustc (optional)       1.54.0-beta.1    rustc --version
+GNU C                  5.1              gcc --version
+Clang/LLVM (optional)  11.0.0           clang --version
+Rust (optional)        1.61.0           rustc --version
 bindgen (optional)     0.56.0           bindgen --version
 GNU make               3.81             make --version
 binutils               2.23             ld -v
 flex                   2.5.35           flex --version
 bison                  2.0              bison --version
+pahole                 1.16             pahole --version
 util-linux             2.10o            fdformat --version
 kmod                   13               depmod -V
 e2fsprogs              1.41.4           e2fsck -V
@@ -61,7 +57,8 @@ mcelog                 0.6              mcelog --version
 iptables               1.4.2            iptables -V
 openssl & libcrypto    1.0.0            openssl version
 bc                     1.06.95          bc --version
-Sphinx\ [#f1]_	       1.3		sphinx-build --version
+Sphinx\ [#f1]_         1.7              sphinx-build --version
+cpio                   any              cpio --version
 ====================== ===============  ========================================
 
 .. [#f1] Sphinx is needed only to build the Kernel documentation
@@ -83,6 +80,29 @@ The latest formal release of clang and LLVM utils (according to
 kernels. Older releases aren't guaranteed to work, and we may drop workarounds
 from the kernel that were used to support older versions. Please see additional
 docs on :ref:`Building Linux with Clang/LLVM <kbuild_llvm>`.
+
+Rust (optional)
+---------------
+
+A particular version of the Rust toolchain is required. Newer versions may or
+may not work because the kernel depends on some unstable Rust features, for
+the moment.
+
+Each Rust toolchain comes with several "components", some of which are required
+(like ``rustc``) and some that are optional. The ``rust-src`` component (which
+is optional) needs to be installed to build the kernel. Other components are
+useful for developing.
+
+Please see Documentation/rust/quick-start.rst for instructions on how to
+satisfy the build requirements of Rust support. In particular, the ``Makefile``
+target ``rustavailable`` is useful to check why the Rust toolchain may not
+be detected.
+
+bindgen (optional)
+------------------
+
+``bindgen`` is used to generate the Rust bindings to the C side of the kernel.
+It depends on ``libclang``.
 
 Make
 ----
@@ -114,6 +134,16 @@ Bison
 
 Since Linux 4.16, the build system generates parsers
 during build.  This requires bison 2.0 or later.
+
+pahole:
+-------
+
+Since Linux 5.2, if CONFIG_DEBUG_INFO_BTF is selected, the build system
+generates BTF (BPF Type Format) from DWARF in vmlinux, a bit later from kernel
+modules as well.  This requires pahole v1.16 or later.
+
+It is found in the 'dwarves' or 'pahole' distro packages or from
+https://fedorapeople.org/~acme/dwarves/.
 
 Perl
 ----
@@ -339,8 +369,8 @@ for details about Sphinx requirements.
 rustdoc
 -------
 
-``rustdoc`` is used to generate Rust documentation. Please see
-:ref:`Documentation/rust/docs.rst <rust_docs>` for more information.
+``rustdoc`` is used to generate the documentation for Rust code. Please see
+Documentation/rust/general-information.rst for more information.
 
 Getting updated software
 ========================
@@ -357,6 +387,16 @@ Clang/LLVM
 ----------
 
 - :ref:`Getting LLVM <getting_llvm>`.
+
+Rust
+----
+
+- Documentation/rust/quick-start.rst.
+
+bindgen
+-------
+
+- Documentation/rust/quick-start.rst.
 
 Make
 ----
@@ -459,6 +499,11 @@ mcelog
 ------
 
 - <http://www.mcelog.org/>
+
+cpio
+----
+
+- <https://www.gnu.org/software/cpio/>
 
 Networking
 **********

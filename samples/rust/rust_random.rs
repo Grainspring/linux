@@ -1,27 +1,34 @@
 // SPDX-License-Identifier: GPL-2.0
 
-//! Rust random device
+//! Rust random device.
 //!
 //! Adapted from Alex Gaynor's original available at
 //! <https://github.com/alex/just-use/blob/master/src/lib.rs>.
 
-#![no_std]
-#![feature(allocator_api, global_asm)]
-
 use kernel::{
-    file::File,
-    file_operations::FileOperations,
+    file::{self, File},
     io_buffer::{IoBufferReader, IoBufferWriter},
     prelude::*,
 };
 
-#[derive(Default)]
+module_misc_device! {
+    type: RandomFile,
+    name: b"rust_random",
+    author: b"Rust for Linux Contributors",
+    description: b"Just use /dev/urandom: Now with early-boot safety",
+    license: b"GPL",
+}
+
 struct RandomFile;
 
-impl FileOperations for RandomFile {
+impl file::Operations for RandomFile {
     kernel::declare_file_operations!(read, write, read_iter, write_iter);
 
-    fn read<T: IoBufferWriter>(_this: &Self, file: &File, buf: &mut T, _: u64) -> Result<usize> {
+    fn open(_data: &(), _file: &File) -> Result {
+        Ok(())
+    }
+
+    fn read(_this: (), file: &File, buf: &mut impl IoBufferWriter, _: u64) -> Result<usize> {
         let total_len = buf.len();
         let mut chunkbuf = [0; 256];
 
@@ -39,7 +46,7 @@ impl FileOperations for RandomFile {
         Ok(total_len)
     }
 
-    fn write<T: IoBufferReader>(_this: &Self, _file: &File, buf: &mut T, _: u64) -> Result<usize> {
+    fn write(_this: (), _file: &File, buf: &mut impl IoBufferReader, _: u64) -> Result<usize> {
         let total_len = buf.len();
         let mut chunkbuf = [0; 256];
         while !buf.is_empty() {
@@ -50,12 +57,4 @@ impl FileOperations for RandomFile {
         }
         Ok(total_len)
     }
-}
-
-module_misc_device! {
-    type: RandomFile,
-    name: b"rust_random",
-    author: b"Rust for Linux Contributors",
-    description: b"Just use /dev/urandom: Now with early-boot safety",
-    license: b"GPL v2",
 }
