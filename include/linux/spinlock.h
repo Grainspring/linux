@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: GPL-2.0 */
 #ifndef __LINUX_SPINLOCK_H
 #define __LINUX_SPINLOCK_H
+#define __LINUX_INSIDE_SPINLOCK_H
 
 /*
  * include/linux/spinlock.h - generic spinlock/rwlock declarations
@@ -338,11 +339,11 @@ static inline void __spin_lock_init(spinlock_t *lock, const char *name,
 	__raw_spin_lock_init(spinlock_check(lock), name, key, LD_WAIT_CONFIG);
 }
 
-# define spin_lock_init(lock)			\
-do {						\
-	static struct lock_class_key __key;	\
-						\
-	__spin_lock_init(lock, #lock, &__key);	\
+# define spin_lock_init(lock)					\
+do {								\
+	static struct lock_class_key __key;			\
+								\
+	__spin_lock_init(lock, #lock, &__key);			\
 } while (0)
 
 #else
@@ -503,4 +504,5 @@ int __alloc_bucket_spinlocks(spinlock_t **locks, unsigned int *lock_mask,
 
 void free_bucket_spinlocks(spinlock_t *locks);
 
+#undef __LINUX_INSIDE_SPINLOCK_H
 #endif /* __LINUX_SPINLOCK_H */

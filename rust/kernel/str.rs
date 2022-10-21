@@ -6,7 +6,7 @@ use alloc::vec::Vec;
 use core::fmt::{self, Write};
 use core::ops::{self, Deref, Index};
 
-use crate::{bindings, c_types, error::code::*, Error};
+use crate::{bindings, error::code::*, Error};
 
 /// Byte string without UTF-8 validity guarantee.
 ///
@@ -91,7 +91,7 @@ impl CStr {
     /// last at least `'a`. When `CStr` is alive, the memory pointed by `ptr`
     /// must not be mutated.
     #[inline]
-    pub unsafe fn from_char_ptr<'a>(ptr: *const c_types::c_char) -> &'a Self {
+    pub unsafe fn from_char_ptr<'a>(ptr: *const core::ffi::c_char) -> &'a Self {
         // SAFETY: The safety precondition guarantees `ptr` is a valid pointer
         // to a `NUL`-terminated C string.
         let len = unsafe { bindings::strlen(ptr) } + 1;
@@ -153,7 +153,7 @@ impl CStr {
 
     /// Returns a C pointer to the string.
     #[inline]
-    pub const fn as_char_ptr(&self) -> *const c_types::c_char {
+    pub const fn as_char_ptr(&self) -> *const core::ffi::c_char {
         self.0.as_ptr() as _
     }
 
@@ -228,7 +228,7 @@ impl fmt::Display for CStr {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         for &c in self.as_bytes() {
             if (0x20..0x7f).contains(&c) {
-                // Printable character
+                // Printable character.
                 f.write_char(c as char)?;
             } else {
                 write!(f, "\\x{:02x}", c)?;
@@ -258,7 +258,7 @@ impl fmt::Debug for CStr {
         f.write_str("\"")?;
         for &c in self.as_bytes() {
             match c {
-                // Printable characters
+                // Printable characters.
                 b'\"' => f.write_str("\\\"")?,
                 0x20..=0x7e => f.write_char(c as char)?,
                 _ => write!(f, "\\x{:02x}", c)?,

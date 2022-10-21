@@ -5,7 +5,7 @@
 //! Each bus/subsystem is expected to implement [`DriverOps`], which allows drivers to register
 //! using the [`Registration`] class.
 
-use crate::{error::code::*, str::CStr, sync::Ref, Result, ThisModule};
+use crate::{error::code::*, str::CStr, sync::Arc, Result, ThisModule};
 use alloc::boxed::Box;
 use core::{cell::UnsafeCell, marker::PhantomData, ops::Deref, pin::Pin};
 
@@ -280,16 +280,16 @@ macro_rules! first_item {
 /// assert_eq!([] as [u32; 0], second_item!());
 /// assert_eq!([10u32], second_item!((X, 10u32)));
 /// assert_eq!([10u32], second_item!((X, 10u32),));
-/// assert_eq!([10u32], second_item!(({X}, 10u32)));
-/// assert_eq!([10u32], second_item!(({X}, 10u32),));
+/// assert_eq!([10u32], second_item!(({ X }, 10u32)));
+/// assert_eq!([10u32], second_item!(({ X }, 10u32),));
 /// assert_eq!([10u32, 20], second_item!((X, 10u32), (X, 20)));
 /// assert_eq!([10u32, 20], second_item!((X, 10u32), (X, 20),));
-/// assert_eq!([10u32, 20], second_item!(({X}, 10u32), ({X}, 20)));
-/// assert_eq!([10u32, 20], second_item!(({X}, 10u32), ({X}, 20),));
+/// assert_eq!([10u32, 20], second_item!(({ X }, 10u32), ({ X }, 20)));
+/// assert_eq!([10u32, 20], second_item!(({ X }, 10u32), ({ X }, 20),));
 /// assert_eq!([10u32, 20, 30], second_item!((X, 10u32), (X, 20), (X, 30)));
 /// assert_eq!([10u32, 20, 30], second_item!((X, 10u32), (X, 20), (X, 30),));
-/// assert_eq!([10u32, 20, 30], second_item!(({X}, 10u32), ({X}, 20), ({X}, 30)));
-/// assert_eq!([10u32, 20, 30], second_item!(({X}, 10u32), ({X}, 20), ({X}, 30),));
+/// assert_eq!([10u32, 20, 30], second_item!(({ X }, 10u32), ({ X }, 20), ({ X }, 30)));
+/// assert_eq!([10u32, 20, 30], second_item!(({ X }, 10u32), ({ X }, 20), ({ X }, 30),));
 /// ```
 #[macro_export]
 macro_rules! second_item {
@@ -397,7 +397,7 @@ impl DeviceRemoval for () {
     fn device_remove(&self) {}
 }
 
-impl<T: DeviceRemoval> DeviceRemoval for Ref<T> {
+impl<T: DeviceRemoval> DeviceRemoval for Arc<T> {
     fn device_remove(&self) {
         self.deref().device_remove();
     }

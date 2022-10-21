@@ -14,17 +14,19 @@
 #![no_std]
 #![feature(allocator_api)]
 #![feature(associated_type_defaults)]
-#![feature(concat_idents)]
+#![feature(coerce_unsized)]
 #![feature(const_mut_refs)]
 #![feature(const_ptr_offset_from)]
 #![feature(const_refs_to_cell)]
 #![feature(const_trait_impl)]
+#![feature(core_ffi_c)]
+#![feature(c_size_t)]
+#![feature(dispatch_from_dyn)]
 #![feature(doc_cfg)]
+#![feature(duration_constants)]
 #![feature(generic_associated_types)]
 #![feature(ptr_metadata)]
 #![feature(receiver_trait)]
-#![feature(coerce_unsized)]
-#![feature(dispatch_from_dyn)]
 #![feature(unsize)]
 
 // Ensure conditional compilation based on the kernel configuration works;
@@ -37,19 +39,22 @@ compile_error!("Missing kernel configuration for conditional compilation");
 mod allocator;
 
 #[doc(hidden)]
-pub mod bindings;
+pub use bindings;
+
+pub use macros;
 
 #[cfg(CONFIG_ARM_AMBA)]
 pub mod amba;
-pub mod c_types;
 pub mod chrdev;
 #[cfg(CONFIG_COMMON_CLK)]
 pub mod clk;
 pub mod cred;
+pub mod delay;
 pub mod device;
 pub mod driver;
 pub mod error;
 pub mod file;
+pub mod fs;
 pub mod gpio;
 pub mod hwrng;
 pub mod irq;
@@ -64,10 +69,12 @@ pub mod revocable;
 pub mod security;
 pub mod str;
 pub mod task;
+pub mod workqueue;
 
 pub mod linked_list;
 mod raw_list;
 pub mod rbtree;
+pub mod unsafe_list;
 
 #[doc(hidden)]
 pub mod module_param;
@@ -102,7 +109,8 @@ pub use build_error::build_error;
 
 pub use crate::error::{to_result, Error, Result};
 pub use crate::types::{
-    bit, bits_iter, ARef, AlwaysRefCounted, Bool, False, Mode, Opaque, ScopeGuard, True,
+    bit, bits_iter, ARef, AlwaysRefCounted, Bit, Bool, Either, Either::Left, Either::Right, False,
+    Mode, Opaque, PointerWrapper, ScopeGuard, True,
 };
 
 use core::marker::PhantomData;
@@ -186,7 +194,7 @@ impl<'a> Drop for KParamGuard<'a> {
 
 /// Calculates the offset of a field from the beginning of the struct it belongs to.
 ///
-/// # Example
+/// # Examples
 ///
 /// ```
 /// # use kernel::prelude::*;
@@ -224,7 +232,7 @@ macro_rules! offset_of {
 /// as opposed to a pointer to another object of the same type. If this condition is not met,
 /// any dereference of the resulting pointer is UB.
 ///
-/// # Example
+/// # Examples
 ///
 /// ```
 /// # use kernel::container_of;
@@ -254,7 +262,6 @@ fn panic(info: &core::panic::PanicInfo<'_>) -> ! {
     // SAFETY: FFI call.
     unsafe { bindings::BUG() };
     // Bindgen currently does not recognize `__noreturn` so `BUG` returns `()`
-    // instead of `!`.
-    // https://github.com/rust-lang/rust-bindgen/issues/2094
+    // instead of `!`. See <https://github.com/rust-lang/rust-bindgen/issues/2094>.
     loop {}
 }

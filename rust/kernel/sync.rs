@@ -5,7 +5,7 @@
 //! This module contains the kernel APIs related to synchronisation that have been ported or
 //! wrapped for usage by Rust code in the kernel and is shared by all of them.
 //!
-//! # Example
+//! # Examples
 //!
 //! ```
 //! # use kernel::mutex_init;
@@ -37,7 +37,7 @@ mod seqlock;
 pub mod smutex;
 mod spinlock;
 
-pub use arc::{new_refcount, Ref, RefBorrow, StaticRef, UniqueRef};
+pub use arc::{new_refcount, Arc, ArcBorrow, StaticArc, UniqueArc};
 pub use condvar::CondVar;
 pub use guard::{Guard, Lock, LockFactory, LockInfo, LockIniter, ReadLock, WriteLock};
 pub use locked_by::LockedBy;
@@ -62,7 +62,7 @@ impl LockClassKey {
         Self(UnsafeCell::new(MaybeUninit::uninit()))
     }
 
-    fn get(&self) -> *mut bindings::lock_class_key {
+    pub(crate) fn get(&self) -> *mut bindings::lock_class_key {
         self.0.get().cast()
     }
 }

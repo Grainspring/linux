@@ -23,6 +23,7 @@
 #include <linux/build_bug.h>
 #include <linux/clk.h>
 #include <linux/errname.h>
+#include <linux/fs_parser.h>
 #include <linux/gfp.h>
 #include <linux/highmem.h>
 #include <linux/io.h>
@@ -619,6 +620,40 @@ unsigned int rust_helper_NF_QUEUE_NR(unsigned int n)
 	return NF_QUEUE_NR(n);
 }
 EXPORT_SYMBOL_GPL(rust_helper_NF_QUEUE_NR);
+
+void rust_helper___INIT_WORK_WITH_KEY(struct work_struct *work,
+		work_func_t func, bool on_stack, struct lock_class_key *key)
+{
+	__INIT_WORK_WITH_KEY(work, func, on_stack, key);
+}
+EXPORT_SYMBOL_GPL(rust_helper___INIT_WORK_WITH_KEY);
+
+struct dentry *rust_helper_dget(struct dentry *dentry)
+{
+	return dget(dentry);
+}
+EXPORT_SYMBOL_GPL(rust_helper_dget);
+
+void rust_helper_lockdep_register_key(struct lock_class_key *key)
+{
+	lockdep_register_key(key);
+}
+EXPORT_SYMBOL_GPL(rust_helper_lockdep_register_key);
+
+void rust_helper_lockdep_unregister_key(struct lock_class_key *key)
+{
+	lockdep_unregister_key(key);
+}
+EXPORT_SYMBOL_GPL(rust_helper_lockdep_unregister_key);
+
+int rust_helper_fs_parse(struct fs_context *fc,
+		const struct fs_parameter_spec *desc,
+		struct fs_parameter *param,
+		struct fs_parse_result *result)
+{
+	return fs_parse(fc, desc, param, result);
+}
+EXPORT_SYMBOL_GPL(rust_helper_fs_parse);
 
 /*
  * We use `bindgen`'s `--size_t-is-usize` option to bind the C `size_t` type

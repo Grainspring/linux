@@ -11,7 +11,7 @@ use crate::{
     bindings,
     revocable::{Revocable, RevocableGuard},
     str::CStr,
-    sync::{LockClassKey, NeedsLockClass, RevocableMutex, RevocableMutexGuard, UniqueRef},
+    sync::{LockClassKey, NeedsLockClass, RevocableMutex, RevocableMutexGuard, UniqueArc},
     Result,
 };
 use core::{
@@ -21,7 +21,7 @@ use core::{
 };
 
 #[cfg(CONFIG_PRINTK)]
-use crate::{c_str, c_types};
+use crate::c_str;
 
 /// A raw device.
 ///
@@ -31,8 +31,9 @@ use crate::{c_str, c_types};
 /// related to `self`, that is, actions on it will affect `self`. For example, if one calls
 /// `get_device`, then the refcount on the device represented by `self` will be incremented.
 ///
-/// Additionally, implementers must ensure that the device is never renamed. Commit a5462516aa994
-/// has details on why `device_rename` should not be used.
+/// Additionally, implementers must ensure that the device is never renamed. Commit a5462516aa99
+/// ("driver-core: document restrictions on device_rename()") has details on why `device_rename`
+/// should not be used.
 pub unsafe trait RawDevice {
     /// Returns the raw `struct device` related to `self`.
     fn raw_device(&self) -> *mut bindings::device;
@@ -149,10 +150,10 @@ pub unsafe trait RawDevice {
         #[cfg(CONFIG_PRINTK)]
         unsafe {
             bindings::_dev_printk(
-                klevel as *const _ as *const c_types::c_char,
+                klevel as *const _ as *const core::ffi::c_char,
                 self.raw_device(),
                 c_str!("%pA").as_char_ptr(),
-                &msg as *const _ as *const c_types::c_void,
+                &msg as *const _ as *const core::ffi::c_void,
             )
         };
     }
@@ -262,8 +263,8 @@ impl<T, U, V> Data<T, U, V> {
         name: &'static CStr,
         key1: &'static LockClassKey,
         key2: &'static LockClassKey,
-    ) -> Result<Pin<UniqueRef<Self>>> {
-        let mut ret = Pin::from(UniqueRef::try_new(Self {
+    ) -> Result<Pin<UniqueArc<Self>>> {
+        let mut ret = Pin::from(UniqueArc::try_new(Self {
             // SAFETY: We call `RevocableMutex::init` below.
             registrations: unsafe { RevocableMutex::new(registrations) },
             resources: Revocable::new(resources),

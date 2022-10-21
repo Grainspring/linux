@@ -10,7 +10,7 @@ use kernel::{
     miscdev::Registration,
     prelude::*,
     str::CStr,
-    sync::Ref,
+    sync::Arc,
     user_ptr::UserSlicePtrWriter,
 };
 
@@ -27,26 +27,21 @@ use {context::Context, thread::Thread};
 
 module! {
     type: BinderModule,
-    name: b"rust_binder",
-    author: b"Wedson Almeida Filho",
-    description: b"Android Binder",
-    license: b"GPL",
-}
-
-enum Either<L, R> {
-    Left(L),
-    Right(R),
+    name: "rust_binder",
+    author: "Wedson Almeida Filho",
+    description: "Android Binder",
+    license: "GPL",
 }
 
 trait DeliverToRead {
     /// Performs work. Returns true if remaining work items in the queue should be processed
     /// immediately, or false if it should return to caller before processing additional work
     /// items.
-    fn do_work(self: Ref<Self>, thread: &Thread, writer: &mut UserSlicePtrWriter) -> Result<bool>;
+    fn do_work(self: Arc<Self>, thread: &Thread, writer: &mut UserSlicePtrWriter) -> Result<bool>;
 
     /// Cancels the given work item. This is called instead of [`DeliverToRead::do_work`] when work
     /// won't be delivered.
-    fn cancel(self: Ref<Self>) {}
+    fn cancel(self: Arc<Self>) {}
 
     /// Returns the linked list links for the work item.
     fn get_links(&self) -> &Links<dyn DeliverToRead>;
@@ -63,7 +58,7 @@ impl GetLinks for DeliverToReadListAdapter {
 }
 
 impl GetLinksWrapped for DeliverToReadListAdapter {
-    type Wrapped = Ref<dyn DeliverToRead>;
+    type Wrapped = Arc<dyn DeliverToRead>;
 }
 
 struct DeliverCode {
@@ -81,7 +76,7 @@ impl DeliverCode {
 }
 
 impl DeliverToRead for DeliverCode {
-    fn do_work(self: Ref<Self>, _thread: &Thread, writer: &mut UserSlicePtrWriter) -> Result<bool> {
+    fn do_work(self: Arc<Self>, _thread: &Thread, writer: &mut UserSlicePtrWriter) -> Result<bool> {
         writer.write(&self.code)?;
         Ok(true)
     }

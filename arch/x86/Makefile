@@ -21,8 +21,13 @@ ifdef CONFIG_CC_IS_CLANG
 RETPOLINE_CFLAGS	:= -mretpoline-external-thunk
 RETPOLINE_VDSO_CFLAGS	:= -mretpoline
 endif
-RETPOLINE_RUSTFLAGS	:= -Ctarget-feature=+retpoline-external-thunk
 
+ifdef CONFIG_RETHUNK
+RETHUNK_CFLAGS		:= -mfunction-return=thunk-extern
+RETPOLINE_CFLAGS	+= $(RETHUNK_CFLAGS)
+endif
+
+export RETHUNK_CFLAGS
 export RETPOLINE_CFLAGS
 export RETPOLINE_VDSO_CFLAGS
 
@@ -197,7 +202,6 @@ ifdef CONFIG_RETPOLINE
   ifndef CONFIG_CC_IS_CLANG
     KBUILD_CFLAGS += -fno-jump-tables
   endif
-  KBUILD_RUSTFLAGS += $(RETPOLINE_RUSTFLAGS)
 endif
 
 ifdef CONFIG_SLS
@@ -239,11 +243,6 @@ archheaders:
 
 ###
 # Kernel objects
-
-head-y := arch/x86/kernel/head_$(BITS).o
-head-y += arch/x86/kernel/head$(BITS).o
-head-y += arch/x86/kernel/ebda.o
-head-y += arch/x86/kernel/platform-quirks.o
 
 libs-y  += arch/x86/lib/
 
@@ -292,10 +291,6 @@ vdso_install:
 
 archprepare: checkbin
 checkbin:
-ifndef CONFIG_CC_HAS_ASM_GOTO
-	@echo Compiler lacks asm-goto support.
-	@exit 1
-endif
 ifdef CONFIG_RETPOLINE
 ifeq ($(RETPOLINE_CFLAGS),)
 	@echo "You are building kernel with non-retpoline compiler." >&2
